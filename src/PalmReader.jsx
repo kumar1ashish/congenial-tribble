@@ -63,38 +63,46 @@ const erodeMask = (mask, width, height, radius) => {
   return result;
 };
 
-// Create palm region mask (excludes fingers and edges)
+// Create palm region mask - very restrictive to only include inner palm
 const createPalmMask = (data, width, height) => {
   // Step 1: Detect skin pixels
   const skinMask = createSkinMask(data, width, height);
 
-  // Step 2: Erode significantly to get inner palm region (removes fingers and edges)
-  const erodeRadius = Math.max(8, Math.floor(Math.min(width, height) / 25));
+  // Step 2: Erode VERY aggressively to get only the innermost palm region
+  // This removes fingers completely and leaves only the palm center
+  const erodeRadius = Math.max(15, Math.floor(Math.min(width, height) / 12));
   const erodedMask = erodeMask(skinMask, width, height, erodeRadius);
 
-  // Step 3: Find bounding box of eroded region to locate palm center
-  let minX = width, maxX = 0, minY = height, maxY = 0;
-  let palmPixelCount = 0;
-
+  // Step 3: Find bounding box of skin region
+  let skinMinY = height, skinMaxY = 0;
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
-      if (erodedMask[y * width + x] === 255) {
-        minX = Math.min(minX, x);
-        maxX = Math.max(maxX, x);
-        minY = Math.min(minY, y);
-        maxY = Math.max(maxY, y);
-        palmPixelCount++;
+      if (skinMask[y * width + x] === 255) {
+        skinMinY = Math.min(skinMinY, y);
+        skinMaxY = Math.max(skinMaxY, y);
       }
     }
   }
 
-  // If no palm detected, return a centered region as fallback
-  if (palmPixelCount < 100) {
+  // Step 4: Find the palm center from eroded mask
+  let sumX = 0, sumY = 0, count = 0;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if (erodedMask[y * width + x] === 255) {
+        sumX += x;
+        sumY += y;
+        count++;
+      }
+    }
+  }
+
+  // If no palm detected after erosion, use fallback
+  if (count < 50) {
     const fallbackMask = new Uint8Array(width * height);
     const centerX = width / 2;
-    const centerY = height / 2;
-    const radiusX = width * 0.3;
-    const radiusY = height * 0.35;
+    const centerY = height * 0.55; // Lower center for palm
+    const radiusX = width * 0.25;
+    const radiusY = height * 0.25;
 
     for (let y = 0; y < height; y++) {
       for (let x = 0; x < width; x++) {
@@ -108,32 +116,29 @@ const createPalmMask = (data, width, height) => {
     return fallbackMask;
   }
 
-  // Step 4: Create a palm-focused mask
-  // The palm is typically in the lower-center of the hand
-  // Expand the eroded region slightly but keep it focused on inner palm
+  const palmCenterX = sumX / count;
+  const palmCenterY = sumY / count;
+
+  // Step 5: Create final palm mask - elliptical region around palm center
+  // Exclude upper portion (fingers) by limiting vertical extent
   const palmMask = new Uint8Array(width * height);
-  const expandRadius = Math.floor(erodeRadius * 0.5);
+  const handHeight = skinMaxY - skinMinY;
+  const palmRadiusX = width * 0.3;
+  const palmRadiusY = handHeight * 0.35;
+
+  // The palm region should be in the lower-middle of the hand
+  // Shift center down slightly to avoid fingers
+  const adjustedCenterY = Math.min(palmCenterY + handHeight * 0.05, skinMaxY - palmRadiusY);
 
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       const idx = y * width + x;
 
-      // Check if within expanded eroded region
-      let nearPalm = false;
-      for (let dy = -expandRadius; dy <= expandRadius && !nearPalm; dy++) {
-        for (let dx = -expandRadius; dx <= expandRadius && !nearPalm; dx++) {
-          const ny = y + dy;
-          const nx = x + dx;
-          if (ny >= 0 && ny < height && nx >= 0 && nx < width) {
-            if (erodedMask[ny * width + nx] === 255) {
-              nearPalm = true;
-            }
-          }
-        }
-      }
+      // Elliptical palm region
+      const dx = (x - palmCenterX) / palmRadiusX;
+      const dy = (y - adjustedCenterY) / palmRadiusY;
 
-      // Also require it to be skin
-      if (nearPalm && skinMask[idx] === 255) {
+      if (dx * dx + dy * dy <= 1 && skinMask[idx] === 255) {
         palmMask[idx] = 255;
       }
     }
@@ -142,28 +147,28 @@ const createPalmMask = (data, width, height) => {
   return palmMask;
 };
 
-// Palm line detection using edge detection optimized for palm creases
+// Palm line detection - optimized for major palm creases only
 const detectPalmLines = (imageData, sensitivity = 50, lineThickness = 2, vlmMask = null, vlmWeight = 0.5) => {
   const { data, width, height } = imageData;
   const gray = new Float32Array(width * height);
   const output = new Uint8ClampedArray(data.length);
 
-  // Create palm region mask to focus detection
+  // Create restrictive palm region mask
   const palmMask = createPalmMask(data, width, height);
 
-  // Convert to grayscale using luminosity method
+  // Convert to grayscale
   for (let i = 0; i < data.length; i += 4) {
     const idx = i / 4;
     gray[idx] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
   }
 
-  // Apply contrast enhancement - slightly reduced to avoid enhancing skin texture
+  // Apply contrast enhancement
   const contrastFactor = 1.2;
   for (let i = 0; i < gray.length; i++) {
     gray[i] = Math.max(0, Math.min(255, ((gray[i] - 128) * contrastFactor) + 128));
   }
 
-  // Apply stronger Gaussian blur to eliminate skin texture
+  // Apply strong Gaussian blur to eliminate skin texture
   const kernel = [1, 4, 6, 4, 1];
   const kernelSum = 16;
 
@@ -196,32 +201,34 @@ const detectPalmLines = (imageData, sensitivity = 50, lineThickness = 2, vlmMask
     return result;
   };
 
-  // Apply blur twice for stronger smoothing
+  // Apply blur 3 times for very strong smoothing
   let blurred = applyGaussianBlur(gray);
   blurred = applyGaussianBlur(blurred);
+  blurred = applyGaussianBlur(blurred);
 
-  // Detect valleys (dark lines) - palm lines are dark grooves
+  // Detect valleys (dark creases) - palm lines are darker than surrounding skin
   const valleys = new Float32Array(width * height);
 
-  for (let y = 2; y < height - 2; y++) {
-    for (let x = 2; x < width - 2; x++) {
+  for (let y = 3; y < height - 3; y++) {
+    for (let x = 3; x < width - 3; x++) {
       const idx = y * width + x;
-
-      // Skip if not in palm region
       if (palmMask[idx] === 0) continue;
 
       const center = blurred[idx];
+
+      // Sample neighbors at larger distance for better crease detection
       const neighbors = [
-        blurred[(y - 2) * width + x],
-        blurred[(y + 2) * width + x],
-        blurred[y * width + (x - 2)],
-        blurred[y * width + (x + 2)],
-        blurred[(y - 2) * width + (x - 2)],
-        blurred[(y - 2) * width + (x + 2)],
-        blurred[(y + 2) * width + (x - 2)],
-        blurred[(y + 2) * width + (x + 2)],
+        blurred[(y - 3) * width + x],
+        blurred[(y + 3) * width + x],
+        blurred[y * width + (x - 3)],
+        blurred[y * width + (x + 3)],
+        blurred[(y - 3) * width + (x - 3)],
+        blurred[(y - 3) * width + (x + 3)],
+        blurred[(y + 3) * width + (x - 3)],
+        blurred[(y + 3) * width + (x + 3)],
       ];
 
+      // Valley score - how much darker is center vs neighbors
       let valleyScore = 0;
       for (const neighbor of neighbors) {
         if (neighbor > center) {
@@ -240,8 +247,6 @@ const detectPalmLines = (imageData, sensitivity = 50, lineThickness = 2, vlmMask
   for (let y = 1; y < height - 1; y++) {
     for (let x = 1; x < width - 1; x++) {
       const idx = y * width + x;
-
-      // Skip if not in palm region
       if (palmMask[idx] === 0) continue;
 
       const gx = (
@@ -259,14 +264,12 @@ const detectPalmLines = (imageData, sensitivity = 50, lineThickness = 2, vlmMask
     }
   }
 
-  // Non-maximum suppression for thin edges
+  // Non-maximum suppression
   const suppressed = new Float32Array(width * height);
 
   for (let y = 2; y < height - 2; y++) {
     for (let x = 2; x < width - 2; x++) {
       const idx = y * width + x;
-
-      // Skip if not in palm region
       if (palmMask[idx] === 0) continue;
 
       const angle = directions[idx];
@@ -297,41 +300,41 @@ const detectPalmLines = (imageData, sensitivity = 50, lineThickness = 2, vlmMask
       }
 
       if (mag >= neighbor1 && mag >= neighbor2) {
-        const valleyBoost = valleys[idx] > 0 ? 1 + (valleys[idx] / 100) : 0.3;
+        // Strongly boost edges that are valleys (dark creases)
+        // Suppress edges that aren't valleys (skin texture, etc.)
+        const valleyBoost = valleys[idx] > 5 ? 1.5 + (valleys[idx] / 50) : 0.1;
         suppressed[idx] = mag * valleyBoost;
       }
     }
   }
 
-  // Find max edge value for threshold calculation
+  // Find max edge for threshold calculation
   let maxEdge = 0;
   for (let i = 0; i < suppressed.length; i++) {
     if (suppressed[i] > maxEdge) maxEdge = suppressed[i];
   }
 
-  // Threshold calculation
+  // Very high threshold - only detect the strongest creases
   const sensitivityFactor = (sensitivity - 20) / 75;
-  const baseThreshold = 0.25;
-  const minThreshold = 0.08;
+  const baseThreshold = 0.35; // Much higher base threshold
+  const minThreshold = 0.15;  // Higher minimum too
   const thresholdMultiplier = baseThreshold - (sensitivityFactor * (baseThreshold - minThreshold));
   const threshold = maxEdge * thresholdMultiplier;
-  const lowThreshold = threshold * 0.5;
+  const lowThreshold = threshold * 0.6;
 
   const result = new Uint8Array(width * height);
 
-  // Hysteresis thresholding - only within palm region
+  // Hysteresis thresholding
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       const idx = y * width + x;
-
-      // Skip if not in palm region
       if (palmMask[idx] === 0) continue;
 
       let effectiveThreshold = threshold;
       let effectiveLowThreshold = lowThreshold;
 
       if (vlmMask && vlmMask[idx] > 0) {
-        const vlmFactor = 1 - (vlmWeight * 0.5);
+        const vlmFactor = 1 - (vlmWeight * 0.4);
         effectiveThreshold = threshold * vlmFactor;
         effectiveLowThreshold = lowThreshold * vlmFactor;
       }
@@ -356,7 +359,7 @@ const detectPalmLines = (imageData, sensitivity = 50, lineThickness = 2, vlmMask
     }
   }
 
-  // Apply dilation based on line thickness setting
+  // Apply dilation
   const dilated = new Uint8Array(width * height);
   const dilateRadius = Math.max(0, Math.floor((lineThickness - 1) / 2));
 
@@ -369,7 +372,6 @@ const detectPalmLines = (imageData, sensitivity = 50, lineThickness = 2, vlmMask
           for (let dy = -dilateRadius; dy <= dilateRadius; dy++) {
             for (let dx = -dilateRadius; dx <= dilateRadius; dx++) {
               if (dx * dx + dy * dy <= dilateRadius * dilateRadius + 1) {
-                // Only dilate within palm region
                 const targetIdx = (y + dy) * width + (x + dx);
                 if (palmMask[targetIdx] === 255) {
                   dilated[targetIdx] = 255;
