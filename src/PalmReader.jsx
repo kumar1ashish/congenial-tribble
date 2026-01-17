@@ -774,7 +774,7 @@ export default function PalmReader() {
   const [vlmProcessing, setVlmProcessing] = useState(false);
   const [vlmError, setVlmError] = useState(null);
   const [showSettings, setShowSettings] = useState(false);
-  const [showLineAnnotations, setShowLineAnnotations] = useState(true);
+  const [showLineAnnotations, setShowLineAnnotations] = useState(false);
 
   // Reading state
   const [palmReading, setPalmReading] = useState(null);
