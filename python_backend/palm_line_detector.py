@@ -22,6 +22,50 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+def create_skin_mask(image: np.ndarray) -> np.ndarray:
+    """
+    Create skin mask using YCbCr color space.
+    Works well for various skin tones.
+    """
+    # Convert RGB to YCbCr
+    ycrcb = cv2.cvtColor(image, cv2.COLOR_RGB2YCrCb)
+    y, cr, cb = cv2.split(ycrcb)
+
+    # Skin detection thresholds in YCbCr space
+    mask = np.zeros(y.shape, dtype=np.uint8)
+    skin_condition = (
+        (y > 80) &
+        (cb > 77) & (cb < 127) &
+        (cr > 133) & (cr < 173)
+    )
+    mask[skin_condition] = 255
+
+    # Clean up mask with morphological operations
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+
+    return mask
+
+
+def create_interior_mask(image: np.ndarray, erosion_ratio: float = 0.05) -> np.ndarray:
+    """
+    Create interior palm mask excluding boundaries.
+    This prevents detecting the hand outline.
+    """
+    skin_mask = create_skin_mask(image)
+
+    # Calculate erosion size based on image dimensions
+    h, w = image.shape[:2]
+    erosion_size = max(15, int(min(h, w) * erosion_ratio))
+
+    # Erode mask to exclude boundaries
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (erosion_size, erosion_size))
+    interior_mask = cv2.erode(skin_mask, kernel)
+
+    return interior_mask
+
+
 @dataclass
 class LineDetectionResult:
     """Container for palm line detection results"""
@@ -91,12 +135,13 @@ class FrangiRidgeDetector:
         # Convert to float [0, 1]
         return img_as_float(blurred)
 
-    def detect(self, image: np.ndarray) -> np.ndarray:
+    def detect(self, image: np.ndarray, interior_mask: np.ndarray = None) -> np.ndarray:
         """
         Apply Frangi vesselness filter to detect ridge structures.
 
         Args:
             image: Input BGR image
+            interior_mask: Optional mask to exclude boundaries
 
         Returns:
             Vessel probability map (high values = likely palm line)
@@ -115,7 +160,11 @@ class FrangiRidgeDetector:
             black_ridges=self.black_ridges
         )
 
-        # Normalize to [0, 255] for visualization
+        # Apply interior mask to exclude hand boundaries
+        if interior_mask is not None:
+            vesselness = vesselness * (interior_mask / 255.0)
+
+        # Normalize to [0, 1]
         vesselness_normalized = (vesselness - vesselness.min()) / (vesselness.max() - vesselness.min() + 1e-8)
 
         return vesselness_normalized
@@ -259,18 +308,20 @@ class GroundingDINOLocator:
     def _fallback_detection(self, image: np.ndarray) -> Dict[str, Tuple[int, int, int, int]]:
         """
         Fallback detection based on typical palm line anatomy.
+        Covers the FULL palm area for each line type.
 
         Palm lines typically appear:
-        - Heart line: Upper portion of palm (top 30-50%)
-        - Head line: Middle portion (40-60%)
-        - Life line: Lower left curve (bottom 50%, left side)
+        - Heart line: Upper portion of palm (horizontal, runs across top)
+        - Head line: Middle portion (horizontal, runs across middle)
+        - Life line: Curves around thumb base (covers more area)
         """
         h, w = image.shape[:2]
 
+        # Use full width for horizontal lines, generous coverage
         return {
-            "heart line": (int(w * 0.1), int(h * 0.15), int(w * 0.9), int(h * 0.35)),
-            "head line": (int(w * 0.1), int(h * 0.35), int(w * 0.9), int(h * 0.55)),
-            "life line": (int(w * 0.05), int(h * 0.25), int(w * 0.5), int(h * 0.85))
+            "heart line": (int(w * 0.05), int(h * 0.15), int(w * 0.95), int(h * 0.40)),
+            "head line": (int(w * 0.05), int(h * 0.30), int(w * 0.95), int(h * 0.60)),
+            "life line": (int(w * 0.05), int(h * 0.20), int(w * 0.95), int(h * 0.90))
         }
 
 
@@ -366,10 +417,12 @@ class SAMSegmenter:
         self,
         image: np.ndarray,
         bounding_boxes: Dict[str, Tuple[int, int, int, int]],
-        frangi_response: Optional[np.ndarray] = None
+        frangi_response: Optional[np.ndarray] = None,
+        interior_mask: Optional[np.ndarray] = None
     ) -> Dict[str, np.ndarray]:
         """
         Fallback segmentation using Frangi response + thresholding.
+        Uses high percentile threshold to only detect major creases.
         """
         h, w = image.shape[:2]
 
@@ -378,23 +431,35 @@ class SAMSegmenter:
             gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
             frangi_response = cv2.Canny(gray, 50, 150).astype(float) / 255.0
 
-        masks_dict = {}
+        # Create interior mask if not provided
+        if interior_mask is None:
+            interior_mask = create_interior_mask(image)
 
-        for line_name, box in bounding_boxes.items():
-            x1, y1, x2, y2 = box
+        # Apply interior mask to Frangi response
+        frangi_masked = frangi_response * (interior_mask / 255.0)
 
-            # Create mask from bounding box
-            mask = np.zeros((h, w), dtype=np.uint8)
+        # Use full palm area instead of individual bounding boxes
+        # This gives better results for the fallback
+        mask = np.zeros((h, w), dtype=np.uint8)
 
-            # Threshold Frangi response within bounding box
-            roi = frangi_response[y1:y2, x1:x2]
-            threshold = np.percentile(roi[roi > 0], 75) if np.any(roi > 0) else 0.1
+        # Get only the strongest responses (top 5%)
+        valid_responses = frangi_masked[frangi_masked > 0]
+        if len(valid_responses) > 0:
+            threshold = np.percentile(valid_responses, 95)  # Only top 5%
 
             # Apply threshold
-            binary_roi = (roi > threshold).astype(np.uint8) * 255
-            mask[y1:y2, x1:x2] = binary_roi
+            binary = (frangi_masked > threshold).astype(np.uint8) * 255
 
-            masks_dict[line_name] = mask
+            # Clean up with morphological operations
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+            binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+
+            mask = binary
+
+        # Return single combined mask for all lines
+        masks_dict = {}
+        for line_name in bounding_boxes.keys():
+            masks_dict[line_name] = mask.copy()
 
         return masks_dict
 
@@ -569,8 +634,12 @@ class PalmLineDetectionPipeline:
         Returns:
             LineDetectionResult with all outputs
         """
+        # Create interior mask to exclude hand boundaries
+        print("Creating interior mask to exclude hand boundaries...")
+        interior_mask = create_interior_mask(image_rgb, erosion_ratio=0.06)
+
         print("Phase 1: Applying Frangi Vesselness Filter...")
-        frangi_response = self.frangi_detector.detect(image_rgb)
+        frangi_response = self.frangi_detector.detect(image_rgb, interior_mask)
         enhanced_rgb = self.frangi_detector.get_enhanced_rgb(frangi_response)
 
         print("Phase 2: Localizing palm lines with Grounding DINO...")
@@ -578,11 +647,23 @@ class PalmLineDetectionPipeline:
         print(f"  Detected {len(bounding_boxes)} lines: {list(bounding_boxes.keys())}")
 
         print("Phase 3: Segmenting lines with SAM...")
-        segmentation_masks = self.sam_segmenter.segment_lines(
-            image_rgb,
-            bounding_boxes,
-            frangi_response
-        )
+        # Pass interior mask to fallback segmentation
+        if self.sam_segmenter.predictor == "fallback" or self.sam_segmenter.predictor is None:
+            self.sam_segmenter.load_model()
+
+        if self.sam_segmenter.predictor == "fallback":
+            segmentation_masks = self.sam_segmenter._fallback_segmentation(
+                image_rgb,
+                bounding_boxes,
+                frangi_response,
+                interior_mask
+            )
+        else:
+            segmentation_masks = self.sam_segmenter.segment_lines(
+                image_rgb,
+                bounding_boxes,
+                frangi_response
+            )
 
         print("Phase 4: Applying Zhang-Suen skeletonization...")
         skeletons, combined_skeleton = self.skeletonizer.skeletonize_all(segmentation_masks)
