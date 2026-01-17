@@ -1,0 +1,19 @@
+{
+  "name": "palm-oracle",
+  "version": "1.0.0",
+  "description": "A mystical palm line detection application that reveals the sacred lines inscribed upon your palm",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.2.1",
+    "vite": "^5.0.0"
+  }
+}
