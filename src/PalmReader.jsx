@@ -68,9 +68,9 @@ const createPalmMask = (data, width, height) => {
   // Step 1: Detect skin pixels
   const skinMask = createSkinMask(data, width, height);
 
-  // Step 2: Erode VERY aggressively to get only the innermost palm region
-  // This removes fingers completely and leaves only the palm center
-  const erodeRadius = Math.max(15, Math.floor(Math.min(width, height) / 12));
+  // Step 2: Erode to get the inner palm region while preserving enough area for lines
+  // Less aggressive to ensure we capture the major palm lines
+  const erodeRadius = Math.max(8, Math.floor(Math.min(width, height) / 20));
   const erodedMask = erodeMask(skinMask, width, height, erodeRadius);
 
   // Step 3: Find bounding box of skin region
@@ -120,11 +120,11 @@ const createPalmMask = (data, width, height) => {
   const palmCenterY = sumY / count;
 
   // Step 5: Create final palm mask - elliptical region around palm center
-  // Exclude upper portion (fingers) by limiting vertical extent
+  // Cover enough area to include all major palm lines
   const palmMask = new Uint8Array(width * height);
   const handHeight = skinMaxY - skinMinY;
-  const palmRadiusX = width * 0.3;
-  const palmRadiusY = handHeight * 0.35;
+  const palmRadiusX = width * 0.38;
+  const palmRadiusY = handHeight * 0.45;
 
   // The palm region should be in the lower-middle of the hand
   // Shift center down slightly to avoid fingers
@@ -300,9 +300,9 @@ const detectPalmLines = (imageData, sensitivity = 50, lineThickness = 2, vlmMask
       }
 
       if (mag >= neighbor1 && mag >= neighbor2) {
-        // Strongly boost edges that are valleys (dark creases)
-        // Suppress edges that aren't valleys (skin texture, etc.)
-        const valleyBoost = valleys[idx] > 5 ? 1.5 + (valleys[idx] / 50) : 0.1;
+        // Boost edges that are valleys (dark creases) - palm lines are darker than skin
+        // Use gentler suppression to catch the actual lines
+        const valleyBoost = valleys[idx] > 2 ? 1.0 + (valleys[idx] / 30) : 0.3;
         suppressed[idx] = mag * valleyBoost;
       }
     }
@@ -314,10 +314,10 @@ const detectPalmLines = (imageData, sensitivity = 50, lineThickness = 2, vlmMask
     if (suppressed[i] > maxEdge) maxEdge = suppressed[i];
   }
 
-  // Very high threshold - only detect the strongest creases
+  // Balanced threshold - detect major creases without skin texture
   const sensitivityFactor = (sensitivity - 20) / 75;
-  const baseThreshold = 0.35; // Much higher base threshold
-  const minThreshold = 0.15;  // Higher minimum too
+  const baseThreshold = 0.18; // Lower base for better detection
+  const minThreshold = 0.08;  // Lower minimum too
   const thresholdMultiplier = baseThreshold - (sensitivityFactor * (baseThreshold - minThreshold));
   const threshold = maxEdge * thresholdMultiplier;
   const lowThreshold = threshold * 0.6;
