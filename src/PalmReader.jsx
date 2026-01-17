@@ -559,8 +559,10 @@ export default function PalmReader() {
   const [lineThickness, setLineThickness] = useState(2);
   const [showOriginal, setShowOriginal] = useState(false);
   const [imageDimensions, setImageDimensions] = useState({ width: 0, height: 0 });
+  const [displayedDimensions, setDisplayedDimensions] = useState({ width: 0, height: 0 });
   const canvasRef = useRef(null);
   const fileInputRef = useRef(null);
+  const displayedImageRef = useRef(null);
 
   // VLM-related state
   const [vlmEnabled, setVlmEnabled] = useState(false);
@@ -591,6 +593,22 @@ export default function PalmReader() {
       localStorage.setItem('vlm_api_key', apiKey);
     }
   }, [apiKey]);
+
+  // Update displayed dimensions when image renders
+  const updateDisplayedDimensions = useCallback(() => {
+    if (displayedImageRef.current) {
+      const { clientWidth, clientHeight } = displayedImageRef.current;
+      if (clientWidth > 0 && clientHeight > 0) {
+        setDisplayedDimensions({ width: clientWidth, height: clientHeight });
+      }
+    }
+  }, []);
+
+  // Update dimensions on window resize
+  useEffect(() => {
+    window.addEventListener('resize', updateDisplayedDimensions);
+    return () => window.removeEventListener('resize', updateDisplayedDimensions);
+  }, [updateDisplayedDimensions]);
 
   const processImage = useCallback((imgSrc, sens = sensitivity, thickness = lineThickness, currentVlmMask = vlmMask, currentVlmWeight = vlmWeight) => {
     setIsProcessing(true);
@@ -1123,8 +1141,10 @@ export default function PalmReader() {
 
                   <div style={{ position: 'relative', display: 'inline-block' }}>
                     <img
+                      ref={displayedImageRef}
                       src={image}
                       alt="Palm"
+                      onLoad={updateDisplayedDimensions}
                       style={{
                         maxWidth: '100%',
                         maxHeight: 450,
@@ -1152,11 +1172,11 @@ export default function PalmReader() {
                     )}
 
                     {/* AI Line Annotations */}
-                    {vlmEnabled && showLineAnnotations && vlmResult && !showOriginal && (
+                    {vlmEnabled && showLineAnnotations && vlmResult && !showOriginal && displayedDimensions.width > 0 && (
                       <LineAnnotationCanvas
                         vlmResult={vlmResult}
-                        width={imageDimensions.width}
-                        height={imageDimensions.height}
+                        width={displayedDimensions.width}
+                        height={displayedDimensions.height}
                       />
                     )}
                   </div>
