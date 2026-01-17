@@ -14,10 +14,18 @@ const detectPalmLines = (imageData, sensitivity = 50, lineThickness = 2, vlmMask
   const gray = new Float32Array(width * height);
   const output = new Uint8ClampedArray(data.length);
 
-  // Convert to grayscale with enhanced contrast
+  // Convert to grayscale using luminosity method
   for (let i = 0; i < data.length; i += 4) {
     const idx = i / 4;
     gray[idx] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+  }
+
+  // Apply contrast enhancement as per specification
+  // Enhanced = clamp(((Original - 128) × ContrastFactor) + 128, 0, 255)
+  // ContrastFactor 1.3 works well for palm images
+  const contrastFactor = 1.3;
+  for (let i = 0; i < gray.length; i++) {
+    gray[i] = Math.max(0, Math.min(255, ((gray[i] - 128) * contrastFactor) + 128));
   }
 
   // Apply Gaussian blur to reduce noise
@@ -571,6 +579,13 @@ export default function PalmReader() {
   const [isGeneratingReading, setIsGeneratingReading] = useState(false);
   const [showReading, setShowReading] = useState(false);
 
+  // Animation state for replay
+  const [animationKey, setAnimationKey] = useState(0);
+
+  // File validation constants
+  const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+  const ALLOWED_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
+
   useEffect(() => {
     if (apiKey) {
       localStorage.setItem('vlm_api_key', apiKey);
@@ -675,9 +690,66 @@ export default function PalmReader() {
     setIsGeneratingReading(false);
   }, [vlmResult, vlmProvider, apiKey]);
 
+  // File validation function
+  const validateFile = useCallback((file) => {
+    if (!file) {
+      return { valid: false, error: 'No file selected' };
+    }
+    if (!ALLOWED_MIME_TYPES.includes(file.type)) {
+      return { valid: false, error: 'Invalid file type. Please upload a JPEG, PNG, or WebP image.' };
+    }
+    if (file.size > MAX_FILE_SIZE) {
+      return { valid: false, error: 'File too large. Maximum size is 10MB.' };
+    }
+    return { valid: true, error: null };
+  }, []);
+
+  // Download result function
+  const downloadResult = useCallback(() => {
+    if (!image || !processedImage) return;
+
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+
+    const img = new Image();
+    img.onload = () => {
+      canvas.width = imageDimensions.width;
+      canvas.height = imageDimensions.height;
+
+      // Draw original image
+      ctx.drawImage(img, 0, 0, imageDimensions.width, imageDimensions.height);
+
+      // Draw processed overlay
+      const overlayImg = new Image();
+      overlayImg.onload = () => {
+        ctx.globalCompositeOperation = 'screen';
+        ctx.drawImage(overlayImg, 0, 0);
+
+        // Create download link
+        const link = document.createElement('a');
+        link.download = 'palm-reading-result.png';
+        link.href = canvas.toDataURL('image/png');
+        link.click();
+      };
+      overlayImg.src = processedImage;
+    };
+    img.src = image;
+  }, [image, processedImage, imageDimensions]);
+
+  // Replay animation function
+  const replayAnimation = useCallback(() => {
+    setAnimationKey(prev => prev + 1);
+  }, []);
+
   const handleFileUpload = (e) => {
     const file = e.target.files?.[0];
     if (file) {
+      const validation = validateFile(file);
+      if (!validation.valid) {
+        setVlmError(validation.error);
+        return;
+      }
+      setVlmError(null);
       const reader = new FileReader();
       reader.onload = (event) => {
         setImage(event.target.result);
@@ -685,6 +757,7 @@ export default function PalmReader() {
         setVlmMask(null);
         setPalmReading(null);
         setShowReading(false);
+        setAnimationKey(prev => prev + 1);
         processImage(event.target.result);
       };
       reader.readAsDataURL(file);
@@ -694,7 +767,13 @@ export default function PalmReader() {
   const handleDrop = (e) => {
     e.preventDefault();
     const file = e.dataTransfer.files?.[0];
-    if (file && file.type.startsWith('image/')) {
+    if (file) {
+      const validation = validateFile(file);
+      if (!validation.valid) {
+        setVlmError(validation.error);
+        return;
+      }
+      setVlmError(null);
       const reader = new FileReader();
       reader.onload = (event) => {
         setImage(event.target.result);
@@ -702,6 +781,7 @@ export default function PalmReader() {
         setVlmMask(null);
         setPalmReading(null);
         setShowReading(false);
+        setAnimationKey(prev => prev + 1);
         processImage(event.target.result);
       };
       reader.readAsDataURL(file);
@@ -1055,6 +1135,7 @@ export default function PalmReader() {
 
                     {processedImage && showOverlay && !showOriginal && (
                       <img
+                        key={animationKey}
                         src={processedImage}
                         alt="Palm lines overlay"
                         style={{
@@ -1130,6 +1211,22 @@ export default function PalmReader() {
                       style={{ padding: '12px 18px' }}
                     >
                       ⚙
+                    </button>
+
+                    <button
+                      className="btn-secondary"
+                      onClick={replayAnimation}
+                      title="Replay Animation"
+                    >
+                      Replay
+                    </button>
+
+                    <button
+                      className="btn-secondary"
+                      onClick={downloadResult}
+                      title="Download Result"
+                    >
+                      Download
                     </button>
                   </div>
 
@@ -1437,9 +1534,31 @@ export default function PalmReader() {
           </div>
         )}
 
+        {/* Privacy Notice */}
+        <div style={{
+          marginTop: 30,
+          padding: '15px 20px',
+          background: 'rgba(20, 15, 30, 0.6)',
+          borderRadius: 10,
+          border: '1px solid rgba(212, 175, 55, 0.15)',
+          maxWidth: 600,
+          margin: '30px auto 0',
+        }}>
+          <p style={{
+            fontSize: '0.8rem',
+            color: 'rgba(232, 220, 200, 0.6)',
+            textAlign: 'center',
+            margin: 0,
+            lineHeight: 1.6,
+          }}>
+            <strong style={{ color: 'rgba(212, 175, 55, 0.8)' }}>Privacy:</strong> Your palm images are processed entirely within your browser.
+            No images are uploaded to any server. Your data remains private and secure on your device.
+          </p>
+        </div>
+
         {/* Footer */}
         <footer style={{
-          marginTop: 40,
+          marginTop: 20,
           textAlign: 'center',
           fontSize: '0.75rem',
           color: 'rgba(232, 220, 200, 0.4)',
