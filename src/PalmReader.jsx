@@ -5,14 +5,151 @@ import {
   generatePalmReading,
   LINE_COLORS,
   getLineColor,
-  VLM_PROVIDERS,
 } from './vlmService';
 
-// Palm line detection using edge detection and line enhancement
+// Skin detection using YCbCr color space - works well for various skin tones
+const createSkinMask = (data, width, height) => {
+  const mask = new Uint8Array(width * height);
+
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i];
+    const g = data[i + 1];
+    const b = data[i + 2];
+    const idx = i / 4;
+
+    // Convert RGB to YCbCr
+    const y = 0.299 * r + 0.587 * g + 0.114 * b;
+    const cb = 128 - 0.168736 * r - 0.331264 * g + 0.5 * b;
+    const cr = 128 + 0.5 * r - 0.418688 * g - 0.081312 * b;
+
+    // Skin detection thresholds in YCbCr space (works for various skin tones)
+    const isSkin = (
+      y > 80 &&
+      cb > 77 && cb < 127 &&
+      cr > 133 && cr < 173
+    );
+
+    mask[idx] = isSkin ? 255 : 0;
+  }
+
+  return mask;
+};
+
+// Morphological erosion to shrink mask
+const erodeMask = (mask, width, height, radius) => {
+  const result = new Uint8Array(width * height);
+
+  for (let y = radius; y < height - radius; y++) {
+    for (let x = radius; x < width - radius; x++) {
+      const idx = y * width + x;
+      let allSet = true;
+
+      // Check if all pixels in the radius are set
+      outer: for (let dy = -radius; dy <= radius; dy++) {
+        for (let dx = -radius; dx <= radius; dx++) {
+          if (dx * dx + dy * dy <= radius * radius) {
+            if (mask[(y + dy) * width + (x + dx)] === 0) {
+              allSet = false;
+              break outer;
+            }
+          }
+        }
+      }
+
+      result[idx] = allSet ? 255 : 0;
+    }
+  }
+
+  return result;
+};
+
+// Create palm region mask (excludes fingers and edges)
+const createPalmMask = (data, width, height) => {
+  // Step 1: Detect skin pixels
+  const skinMask = createSkinMask(data, width, height);
+
+  // Step 2: Erode significantly to get inner palm region (removes fingers and edges)
+  const erodeRadius = Math.max(8, Math.floor(Math.min(width, height) / 25));
+  const erodedMask = erodeMask(skinMask, width, height, erodeRadius);
+
+  // Step 3: Find bounding box of eroded region to locate palm center
+  let minX = width, maxX = 0, minY = height, maxY = 0;
+  let palmPixelCount = 0;
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if (erodedMask[y * width + x] === 255) {
+        minX = Math.min(minX, x);
+        maxX = Math.max(maxX, x);
+        minY = Math.min(minY, y);
+        maxY = Math.max(maxY, y);
+        palmPixelCount++;
+      }
+    }
+  }
+
+  // If no palm detected, return a centered region as fallback
+  if (palmPixelCount < 100) {
+    const fallbackMask = new Uint8Array(width * height);
+    const centerX = width / 2;
+    const centerY = height / 2;
+    const radiusX = width * 0.3;
+    const radiusY = height * 0.35;
+
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const dx = (x - centerX) / radiusX;
+        const dy = (y - centerY) / radiusY;
+        if (dx * dx + dy * dy <= 1) {
+          fallbackMask[y * width + x] = 255;
+        }
+      }
+    }
+    return fallbackMask;
+  }
+
+  // Step 4: Create a palm-focused mask
+  // The palm is typically in the lower-center of the hand
+  // Expand the eroded region slightly but keep it focused on inner palm
+  const palmMask = new Uint8Array(width * height);
+  const expandRadius = Math.floor(erodeRadius * 0.5);
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const idx = y * width + x;
+
+      // Check if within expanded eroded region
+      let nearPalm = false;
+      for (let dy = -expandRadius; dy <= expandRadius && !nearPalm; dy++) {
+        for (let dx = -expandRadius; dx <= expandRadius && !nearPalm; dx++) {
+          const ny = y + dy;
+          const nx = x + dx;
+          if (ny >= 0 && ny < height && nx >= 0 && nx < width) {
+            if (erodedMask[ny * width + nx] === 255) {
+              nearPalm = true;
+            }
+          }
+        }
+      }
+
+      // Also require it to be skin
+      if (nearPalm && skinMask[idx] === 255) {
+        palmMask[idx] = 255;
+      }
+    }
+  }
+
+  return palmMask;
+};
+
+// Palm line detection using edge detection optimized for palm creases
 const detectPalmLines = (imageData, sensitivity = 50, lineThickness = 2, vlmMask = null, vlmWeight = 0.5) => {
   const { data, width, height } = imageData;
   const gray = new Float32Array(width * height);
   const output = new Uint8ClampedArray(data.length);
+
+  // Create palm region mask to focus detection
+  const palmMask = createPalmMask(data, width, height);
 
   // Convert to grayscale using luminosity method
   for (let i = 0; i < data.length; i += 4) {
@@ -20,41 +157,79 @@ const detectPalmLines = (imageData, sensitivity = 50, lineThickness = 2, vlmMask
     gray[idx] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
   }
 
-  // Apply contrast enhancement as per specification
-  // Enhanced = clamp(((Original - 128) × ContrastFactor) + 128, 0, 255)
-  // ContrastFactor 1.3 works well for palm images
-  const contrastFactor = 1.3;
+  // Apply contrast enhancement - slightly reduced to avoid enhancing skin texture
+  const contrastFactor = 1.2;
   for (let i = 0; i < gray.length; i++) {
     gray[i] = Math.max(0, Math.min(255, ((gray[i] - 128) * contrastFactor) + 128));
   }
 
-  // Apply Gaussian blur to reduce noise
-  const blurred = new Float32Array(width * height);
+  // Apply stronger Gaussian blur to eliminate skin texture
   const kernel = [1, 4, 6, 4, 1];
   const kernelSum = 16;
 
-  // Horizontal pass
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      let sum = 0;
-      for (let k = -2; k <= 2; k++) {
-        const px = Math.min(Math.max(x + k, 0), width - 1);
-        sum += gray[y * width + px] * kernel[k + 2];
-      }
-      blurred[y * width + x] = sum / kernelSum;
-    }
-  }
+  const applyGaussianBlur = (input) => {
+    const temp = new Float32Array(width * height);
+    const result = new Float32Array(width * height);
 
-  // Vertical pass
-  const blurred2 = new Float32Array(width * height);
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      let sum = 0;
-      for (let k = -2; k <= 2; k++) {
-        const py = Math.min(Math.max(y + k, 0), height - 1);
-        sum += blurred[py * width + x] * kernel[k + 2];
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        let sum = 0;
+        for (let k = -2; k <= 2; k++) {
+          const px = Math.min(Math.max(x + k, 0), width - 1);
+          sum += input[y * width + px] * kernel[k + 2];
+        }
+        temp[y * width + x] = sum / kernelSum;
       }
-      blurred2[y * width + x] = sum / kernelSum;
+    }
+
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        let sum = 0;
+        for (let k = -2; k <= 2; k++) {
+          const py = Math.min(Math.max(y + k, 0), height - 1);
+          sum += temp[py * width + x] * kernel[k + 2];
+        }
+        result[y * width + x] = sum / kernelSum;
+      }
+    }
+
+    return result;
+  };
+
+  // Apply blur twice for stronger smoothing
+  let blurred = applyGaussianBlur(gray);
+  blurred = applyGaussianBlur(blurred);
+
+  // Detect valleys (dark lines) - palm lines are dark grooves
+  const valleys = new Float32Array(width * height);
+
+  for (let y = 2; y < height - 2; y++) {
+    for (let x = 2; x < width - 2; x++) {
+      const idx = y * width + x;
+
+      // Skip if not in palm region
+      if (palmMask[idx] === 0) continue;
+
+      const center = blurred[idx];
+      const neighbors = [
+        blurred[(y - 2) * width + x],
+        blurred[(y + 2) * width + x],
+        blurred[y * width + (x - 2)],
+        blurred[y * width + (x + 2)],
+        blurred[(y - 2) * width + (x - 2)],
+        blurred[(y - 2) * width + (x + 2)],
+        blurred[(y + 2) * width + (x - 2)],
+        blurred[(y + 2) * width + (x + 2)],
+      ];
+
+      let valleyScore = 0;
+      for (const neighbor of neighbors) {
+        if (neighbor > center) {
+          valleyScore += neighbor - center;
+        }
+      }
+
+      valleys[idx] = valleyScore;
     }
   }
 
@@ -66,14 +241,17 @@ const detectPalmLines = (imageData, sensitivity = 50, lineThickness = 2, vlmMask
     for (let x = 1; x < width - 1; x++) {
       const idx = y * width + x;
 
+      // Skip if not in palm region
+      if (palmMask[idx] === 0) continue;
+
       const gx = (
-        -blurred2[(y - 1) * width + (x - 1)] - 2 * blurred2[y * width + (x - 1)] - blurred2[(y + 1) * width + (x - 1)] +
-        blurred2[(y - 1) * width + (x + 1)] + 2 * blurred2[y * width + (x + 1)] + blurred2[(y + 1) * width + (x + 1)]
+        -blurred[(y - 1) * width + (x - 1)] - 2 * blurred[y * width + (x - 1)] - blurred[(y + 1) * width + (x - 1)] +
+        blurred[(y - 1) * width + (x + 1)] + 2 * blurred[y * width + (x + 1)] + blurred[(y + 1) * width + (x + 1)]
       );
 
       const gy = (
-        -blurred2[(y - 1) * width + (x - 1)] - 2 * blurred2[(y - 1) * width + x] - blurred2[(y - 1) * width + (x + 1)] +
-        blurred2[(y + 1) * width + (x - 1)] + 2 * blurred2[(y + 1) * width + x] + blurred2[(y + 1) * width + (x + 1)]
+        -blurred[(y - 1) * width + (x - 1)] - 2 * blurred[(y - 1) * width + x] - blurred[(y - 1) * width + (x + 1)] +
+        blurred[(y + 1) * width + (x - 1)] + 2 * blurred[(y + 1) * width + x] + blurred[(y + 1) * width + (x + 1)]
       );
 
       edges[idx] = Math.sqrt(gx * gx + gy * gy);
@@ -81,12 +259,16 @@ const detectPalmLines = (imageData, sensitivity = 50, lineThickness = 2, vlmMask
     }
   }
 
-  // Non-maximum suppression
+  // Non-maximum suppression for thin edges
   const suppressed = new Float32Array(width * height);
 
   for (let y = 2; y < height - 2; y++) {
     for (let x = 2; x < width - 2; x++) {
       const idx = y * width + x;
+
+      // Skip if not in palm region
+      if (palmMask[idx] === 0) continue;
+
       const angle = directions[idx];
       const mag = edges[idx];
 
@@ -115,30 +297,41 @@ const detectPalmLines = (imageData, sensitivity = 50, lineThickness = 2, vlmMask
       }
 
       if (mag >= neighbor1 && mag >= neighbor2) {
-        suppressed[idx] = mag;
+        const valleyBoost = valleys[idx] > 0 ? 1 + (valleys[idx] / 100) : 0.3;
+        suppressed[idx] = mag * valleyBoost;
       }
     }
   }
 
+  // Find max edge value for threshold calculation
   let maxEdge = 0;
   for (let i = 0; i < suppressed.length; i++) {
     if (suppressed[i] > maxEdge) maxEdge = suppressed[i];
   }
 
-  const threshold = maxEdge * (1 - sensitivity / 100) * 0.15;
-  const lowThreshold = threshold * 0.4;
+  // Threshold calculation
+  const sensitivityFactor = (sensitivity - 20) / 75;
+  const baseThreshold = 0.25;
+  const minThreshold = 0.08;
+  const thresholdMultiplier = baseThreshold - (sensitivityFactor * (baseThreshold - minThreshold));
+  const threshold = maxEdge * thresholdMultiplier;
+  const lowThreshold = threshold * 0.5;
 
   const result = new Uint8Array(width * height);
 
+  // Hysteresis thresholding - only within palm region
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       const idx = y * width + x;
+
+      // Skip if not in palm region
+      if (palmMask[idx] === 0) continue;
 
       let effectiveThreshold = threshold;
       let effectiveLowThreshold = lowThreshold;
 
       if (vlmMask && vlmMask[idx] > 0) {
-        const vlmFactor = 1 - (vlmWeight * 0.7);
+        const vlmFactor = 1 - (vlmWeight * 0.5);
         effectiveThreshold = threshold * vlmFactor;
         effectiveLowThreshold = lowThreshold * vlmFactor;
       }
@@ -159,24 +352,29 @@ const detectPalmLines = (imageData, sensitivity = 50, lineThickness = 2, vlmMask
           }
         }
         if (connected) result[idx] = 255;
-
-        if (!connected && vlmMask && vlmMask[idx] > 0 && suppressed[idx] > lowThreshold * 0.3) {
-          result[idx] = 255;
-        }
       }
     }
   }
 
+  // Apply dilation based on line thickness setting
   const dilated = new Uint8Array(width * height);
-  const dilateRadius = Math.max(1, Math.floor(lineThickness / 2));
+  const dilateRadius = Math.max(0, Math.floor((lineThickness - 1) / 2));
 
-  for (let y = dilateRadius; y < height - dilateRadius; y++) {
-    for (let x = dilateRadius; x < width - dilateRadius; x++) {
-      if (result[y * width + x] === 255) {
-        for (let dy = -dilateRadius; dy <= dilateRadius; dy++) {
-          for (let dx = -dilateRadius; dx <= dilateRadius; dx++) {
-            if (dx * dx + dy * dy <= dilateRadius * dilateRadius + 1) {
-              dilated[(y + dy) * width + (x + dx)] = 255;
+  if (dilateRadius === 0) {
+    dilated.set(result);
+  } else {
+    for (let y = dilateRadius; y < height - dilateRadius; y++) {
+      for (let x = dilateRadius; x < width - dilateRadius; x++) {
+        if (result[y * width + x] === 255) {
+          for (let dy = -dilateRadius; dy <= dilateRadius; dy++) {
+            for (let dx = -dilateRadius; dx <= dilateRadius; dx++) {
+              if (dx * dx + dy * dy <= dilateRadius * dilateRadius + 1) {
+                // Only dilate within palm region
+                const targetIdx = (y + dy) * width + (x + dx);
+                if (palmMask[targetIdx] === 255) {
+                  dilated[targetIdx] = 255;
+                }
+              }
             }
           }
         }
@@ -184,6 +382,7 @@ const detectPalmLines = (imageData, sensitivity = 50, lineThickness = 2, vlmMask
     }
   }
 
+  // Output golden colored lines
   for (let i = 0; i < data.length; i += 4) {
     const idx = i / 4;
     if (dilated[idx] === 255) {
@@ -566,15 +765,14 @@ export default function PalmReader() {
 
   // VLM-related state
   const [vlmEnabled, setVlmEnabled] = useState(false);
-  const [vlmProvider, setVlmProvider] = useState(VLM_PROVIDERS.OPENAI);
-  const [apiKey, setApiKey] = useState(() => localStorage.getItem('vlm_api_key') || '');
+  const [apiKey, setApiKey] = useState(() => localStorage.getItem('anthropic_api_key') || '');
   const [vlmResult, setVlmResult] = useState(null);
   const [vlmMask, setVlmMask] = useState(null);
   const [vlmWeight, setVlmWeight] = useState(0.6);
   const [vlmProcessing, setVlmProcessing] = useState(false);
   const [vlmError, setVlmError] = useState(null);
   const [showSettings, setShowSettings] = useState(false);
-  const [showLineAnnotations, setShowLineAnnotations] = useState(true);
+  const [showLineAnnotations, setShowLineAnnotations] = useState(false);
 
   // Reading state
   const [palmReading, setPalmReading] = useState(null);
@@ -590,7 +788,7 @@ export default function PalmReader() {
 
   useEffect(() => {
     if (apiKey) {
-      localStorage.setItem('vlm_api_key', apiKey);
+      localStorage.setItem('anthropic_api_key', apiKey);
     }
   }, [apiKey]);
 
@@ -659,7 +857,7 @@ export default function PalmReader() {
     setVlmError(null);
 
     try {
-      const result = await analyzeWithVLM(imgSrc, vlmProvider, apiKey);
+      const result = await analyzeWithVLM(imgSrc, apiKey);
       setVlmResult(result);
 
       if (result.lines && result.lines.length > 0) {
@@ -686,7 +884,7 @@ export default function PalmReader() {
       setVlmError(err.message);
       setVlmProcessing(false);
     }
-  }, [apiKey, vlmProvider, sensitivity, lineThickness, vlmWeight, processImage]);
+  }, [apiKey, sensitivity, lineThickness, vlmWeight, processImage]);
 
   const generateReading = useCallback(async () => {
     if (!vlmResult || !apiKey) {
@@ -698,7 +896,7 @@ export default function PalmReader() {
     setShowReading(true);
 
     try {
-      const reading = await generatePalmReading(vlmResult, vlmProvider, apiKey);
+      const reading = await generatePalmReading(vlmResult, apiKey);
       setPalmReading(reading);
     } catch (err) {
       console.error('Reading generation error:', err);
@@ -706,7 +904,7 @@ export default function PalmReader() {
     }
 
     setIsGeneratingReading(false);
-  }, [vlmResult, vlmProvider, apiKey]);
+  }, [vlmResult, apiKey]);
 
   // File validation function
   const validateFile = useCallback((file) => {
@@ -1282,40 +1480,18 @@ export default function PalmReader() {
                         marginTop: 0,
                         marginBottom: 12,
                       }}>
-                        AI Settings
+                        AI Settings (Anthropic Claude)
                       </h4>
 
                       <div style={{ marginBottom: 12 }}>
                         <label style={{ display: 'block', marginBottom: 5, fontSize: '0.8rem', color: 'rgba(232, 220, 200, 0.7)' }}>
-                          Provider
-                        </label>
-                        <select
-                          value={vlmProvider}
-                          onChange={(e) => setVlmProvider(e.target.value)}
-                          style={{
-                            width: '100%',
-                            padding: '8px 12px',
-                            background: 'rgba(20, 15, 30, 0.8)',
-                            border: '1px solid rgba(212, 175, 55, 0.3)',
-                            borderRadius: 6,
-                            color: '#e8dcc8',
-                            fontSize: '0.85rem',
-                          }}
-                        >
-                          <option value={VLM_PROVIDERS.OPENAI}>OpenAI (GPT-4o)</option>
-                          <option value={VLM_PROVIDERS.ANTHROPIC}>Anthropic (Claude)</option>
-                        </select>
-                      </div>
-
-                      <div style={{ marginBottom: 12 }}>
-                        <label style={{ display: 'block', marginBottom: 5, fontSize: '0.8rem', color: 'rgba(232, 220, 200, 0.7)' }}>
-                          API Key
+                          Anthropic API Key
                         </label>
                         <input
                           type="password"
                           value={apiKey}
                           onChange={(e) => setApiKey(e.target.value)}
-                          placeholder="Enter API key"
+                          placeholder="Enter Anthropic API key"
                           style={{
                             width: '100%',
                             padding: '8px 12px',
