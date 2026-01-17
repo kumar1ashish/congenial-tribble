@@ -63,124 +63,319 @@ const erodeMask = (mask, width, height, radius) => {
   return result;
 };
 
-// Create interior palm mask - excludes all boundary pixels
+// Create interior palm mask - excludes boundary pixels
 const createInteriorMask = (data, width, height) => {
   const skinMask = createSkinMask(data, width, height);
-
-  // Very aggressive erosion to get only interior pixels far from any edge
-  const erodeRadius = Math.max(20, Math.floor(Math.min(width, height) / 10));
-  const interiorMask = erodeMask(skinMask, width, height, erodeRadius);
-
-  return interiorMask;
+  const erodeRadius = Math.max(15, Math.floor(Math.min(width, height) / 15));
+  return erodeMask(skinMask, width, height, erodeRadius);
 };
 
-// Palm line detection - detects dark creases within palm interior only
+// CLAHE - Contrast Limited Adaptive Histogram Equalization
+const applyCLAHE = (gray, width, height, tileSize = 32, clipLimit = 2.0) => {
+  const result = new Float32Array(width * height);
+  const tilesX = Math.ceil(width / tileSize);
+  const tilesY = Math.ceil(height / tileSize);
+
+  // For each tile, compute histogram equalization
+  for (let ty = 0; ty < tilesY; ty++) {
+    for (let tx = 0; tx < tilesX; tx++) {
+      const startX = tx * tileSize;
+      const startY = ty * tileSize;
+      const endX = Math.min(startX + tileSize, width);
+      const endY = Math.min(startY + tileSize, height);
+
+      // Build histogram for this tile
+      const hist = new Float32Array(256);
+      let count = 0;
+      for (let y = startY; y < endY; y++) {
+        for (let x = startX; x < endX; x++) {
+          const val = Math.floor(gray[y * width + x]);
+          hist[Math.min(255, Math.max(0, val))]++;
+          count++;
+        }
+      }
+
+      // Clip histogram
+      const clipThreshold = (clipLimit * count) / 256;
+      let excess = 0;
+      for (let i = 0; i < 256; i++) {
+        if (hist[i] > clipThreshold) {
+          excess += hist[i] - clipThreshold;
+          hist[i] = clipThreshold;
+        }
+      }
+
+      // Redistribute excess
+      const increment = excess / 256;
+      for (let i = 0; i < 256; i++) {
+        hist[i] += increment;
+      }
+
+      // Build CDF
+      const cdf = new Float32Array(256);
+      cdf[0] = hist[0];
+      for (let i = 1; i < 256; i++) {
+        cdf[i] = cdf[i - 1] + hist[i];
+      }
+
+      // Normalize CDF
+      const cdfMin = cdf[0];
+      const cdfMax = cdf[255];
+      for (let i = 0; i < 256; i++) {
+        cdf[i] = ((cdf[i] - cdfMin) / (cdfMax - cdfMin)) * 255;
+      }
+
+      // Apply to pixels in this tile
+      for (let y = startY; y < endY; y++) {
+        for (let x = startX; x < endX; x++) {
+          const idx = y * width + x;
+          const val = Math.floor(gray[idx]);
+          result[idx] = cdf[Math.min(255, Math.max(0, val))];
+        }
+      }
+    }
+  }
+
+  return result;
+};
+
+// Gabor filter for directional line detection
+const createGaborKernel = (size, theta, lambda, sigma, gamma) => {
+  const kernel = [];
+  const halfSize = Math.floor(size / 2);
+
+  for (let y = -halfSize; y <= halfSize; y++) {
+    for (let x = -halfSize; x <= halfSize; x++) {
+      const xTheta = x * Math.cos(theta) + y * Math.sin(theta);
+      const yTheta = -x * Math.sin(theta) + y * Math.cos(theta);
+
+      const gaussian = Math.exp(-(xTheta * xTheta + gamma * gamma * yTheta * yTheta) / (2 * sigma * sigma));
+      const sinusoidal = Math.cos((2 * Math.PI * xTheta) / lambda);
+
+      kernel.push(gaussian * sinusoidal);
+    }
+  }
+
+  return { kernel, size };
+};
+
+// Apply Gabor filter bank for multi-directional line detection
+const applyGaborFilterBank = (gray, width, height, mask) => {
+  const response = new Float32Array(width * height);
+
+  // Palm lines typically appear at these orientations (in radians)
+  // 0° (horizontal), 45°, 90° (vertical), 135°
+  const orientations = [0, Math.PI / 6, Math.PI / 4, Math.PI / 3, Math.PI / 2, 2 * Math.PI / 3, 3 * Math.PI / 4, 5 * Math.PI / 6];
+
+  // Create Gabor kernels for each orientation
+  const kernelSize = 9;
+  const lambda = 4; // Wavelength - controls line thickness sensitivity
+  const sigma = 2;  // Gaussian envelope size
+  const gamma = 0.5; // Spatial aspect ratio
+
+  const kernels = orientations.map(theta => createGaborKernel(kernelSize, theta, lambda, sigma, gamma));
+
+  const halfSize = Math.floor(kernelSize / 2);
+
+  // Apply all kernels and take maximum response
+  for (let y = halfSize; y < height - halfSize; y++) {
+    for (let x = halfSize; x < width - halfSize; x++) {
+      const idx = y * width + x;
+      if (mask[idx] === 0) continue;
+
+      let maxResponse = 0;
+
+      for (const { kernel, size } of kernels) {
+        let sum = 0;
+        let ki = 0;
+        const hs = Math.floor(size / 2);
+
+        for (let ky = -hs; ky <= hs; ky++) {
+          for (let kx = -hs; kx <= hs; kx++) {
+            const px = x + kx;
+            const py = y + ky;
+            sum += gray[py * width + px] * kernel[ki];
+            ki++;
+          }
+        }
+
+        // Take absolute value (detect both dark and light lines, but we want dark)
+        // Negative response means dark line on light background
+        maxResponse = Math.max(maxResponse, -sum);
+      }
+
+      response[idx] = maxResponse;
+    }
+  }
+
+  return response;
+};
+
+// Multi-scale line detection
+const multiScaleLineDetection = (gray, width, height, mask) => {
+  const scales = [1, 1.5, 2]; // Different scales for different line thicknesses
+  const combined = new Float32Array(width * height);
+
+  for (const scale of scales) {
+    // Downsample for larger scales
+    if (scale === 1) {
+      const response = applyGaborFilterBank(gray, width, height, mask);
+      for (let i = 0; i < combined.length; i++) {
+        combined[i] = Math.max(combined[i], response[i]);
+      }
+    } else {
+      // For other scales, use different sampling distance in valley detection
+      const sampleDist = Math.round(4 * scale);
+
+      for (let y = sampleDist; y < height - sampleDist; y++) {
+        for (let x = sampleDist; x < width - sampleDist; x++) {
+          const idx = y * width + x;
+          if (mask[idx] === 0) continue;
+
+          const center = gray[idx];
+
+          // Sample perpendicular to potential line directions
+          const samples = [
+            [gray[(y - sampleDist) * width + x], gray[(y + sampleDist) * width + x]],
+            [gray[y * width + (x - sampleDist)], gray[y * width + (x + sampleDist)]],
+            [gray[(y - sampleDist) * width + (x - sampleDist)], gray[(y + sampleDist) * width + (x + sampleDist)]],
+            [gray[(y - sampleDist) * width + (x + sampleDist)], gray[(y + sampleDist) * width + (x - sampleDist)]],
+          ];
+
+          let maxScore = 0;
+          for (const [s1, s2] of samples) {
+            const minSide = Math.min(s1, s2);
+            if (center < minSide) {
+              maxScore = Math.max(maxScore, (minSide - center) * scale);
+            }
+          }
+
+          combined[idx] = Math.max(combined[idx], maxScore);
+        }
+      }
+    }
+  }
+
+  return combined;
+};
+
+// Morphological closing to connect broken line segments
+const morphologicalClose = (binary, width, height, radius) => {
+  // Dilate then erode
+  const dilated = new Uint8Array(width * height);
+  const result = new Uint8Array(width * height);
+
+  // Dilate
+  for (let y = radius; y < height - radius; y++) {
+    for (let x = radius; x < width - radius; x++) {
+      if (binary[y * width + x] === 255) {
+        for (let dy = -radius; dy <= radius; dy++) {
+          for (let dx = -radius; dx <= radius; dx++) {
+            if (dx * dx + dy * dy <= radius * radius) {
+              dilated[(y + dy) * width + (x + dx)] = 255;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Erode
+  for (let y = radius; y < height - radius; y++) {
+    for (let x = radius; x < width - radius; x++) {
+      const idx = y * width + x;
+      let allSet = true;
+
+      outer: for (let dy = -radius; dy <= radius; dy++) {
+        for (let dx = -radius; dx <= radius; dx++) {
+          if (dx * dx + dy * dy <= radius * radius) {
+            if (dilated[(y + dy) * width + (x + dx)] === 0) {
+              allSet = false;
+              break outer;
+            }
+          }
+        }
+      }
+
+      result[idx] = allSet ? 255 : 0;
+    }
+  }
+
+  return result;
+};
+
+// Palm line detection using Gabor filters + CLAHE + multi-scale analysis
 const detectPalmLines = (imageData, sensitivity = 50, lineThickness = 2, vlmMask = null, vlmWeight = 0.5) => {
   const { data, width, height } = imageData;
-  const gray = new Float32Array(width * height);
   const output = new Uint8ClampedArray(data.length);
 
-  // Create interior-only mask (far from any skin boundary)
+  // Create interior mask to exclude boundaries
   const interiorMask = createInteriorMask(data, width, height);
 
   // Convert to grayscale
+  const gray = new Float32Array(width * height);
   for (let i = 0; i < data.length; i += 4) {
-    const idx = i / 4;
-    gray[idx] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+    gray[i / 4] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
   }
 
-  // Apply Gaussian blur to reduce noise while preserving creases
+  // Apply CLAHE for contrast normalization
+  const enhanced = applyCLAHE(gray, width, height, 48, 2.5);
+
+  // Apply Gaussian blur to reduce noise
   const kernel = [1, 4, 6, 4, 1];
   const kernelSum = 16;
+  const blurred = new Float32Array(width * height);
 
-  const applyGaussianBlur = (input) => {
-    const temp = new Float32Array(width * height);
-    const result = new Float32Array(width * height);
-
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        let sum = 0;
-        for (let k = -2; k <= 2; k++) {
-          const px = Math.min(Math.max(x + k, 0), width - 1);
-          sum += input[y * width + px] * kernel[k + 2];
-        }
-        temp[y * width + x] = sum / kernelSum;
+  // Horizontal pass
+  const temp = new Float32Array(width * height);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      let sum = 0;
+      for (let k = -2; k <= 2; k++) {
+        const px = Math.min(Math.max(x + k, 0), width - 1);
+        sum += enhanced[y * width + px] * kernel[k + 2];
       }
-    }
-
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        let sum = 0;
-        for (let k = -2; k <= 2; k++) {
-          const py = Math.min(Math.max(y + k, 0), height - 1);
-          sum += temp[py * width + x] * kernel[k + 2];
-        }
-        result[y * width + x] = sum / kernelSum;
-      }
-    }
-
-    return result;
-  };
-
-  // Apply moderate blur
-  let blurred = applyGaussianBlur(gray);
-  blurred = applyGaussianBlur(blurred);
-
-  // Detect valleys (dark creases) - palm lines are darker than surrounding skin
-  // This is the PRIMARY detection method - not edge detection
-  const creaseStrength = new Float32Array(width * height);
-  const sampleDist = 4;
-
-  for (let y = sampleDist; y < height - sampleDist; y++) {
-    for (let x = sampleDist; x < width - sampleDist; x++) {
-      const idx = y * width + x;
-      if (interiorMask[idx] === 0) continue;
-
-      const center = blurred[idx];
-
-      // Sample in multiple directions to find creases
-      const samples = [
-        [blurred[(y - sampleDist) * width + x], blurred[(y + sampleDist) * width + x]], // vertical
-        [blurred[y * width + (x - sampleDist)], blurred[y * width + (x + sampleDist)]], // horizontal
-        [blurred[(y - sampleDist) * width + (x - sampleDist)], blurred[(y + sampleDist) * width + (x + sampleDist)]], // diagonal 1
-        [blurred[(y - sampleDist) * width + (x + sampleDist)], blurred[(y + sampleDist) * width + (x - sampleDist)]], // diagonal 2
-      ];
-
-      // A crease is where center is darker than BOTH sides in at least one direction
-      let maxCreaseScore = 0;
-      for (const [side1, side2] of samples) {
-        const minSide = Math.min(side1, side2);
-        if (center < minSide) {
-          // Center is darker than both sides - this is a crease
-          const creaseScore = minSide - center;
-          maxCreaseScore = Math.max(maxCreaseScore, creaseScore);
-        }
-      }
-
-      creaseStrength[idx] = maxCreaseScore;
+      temp[y * width + x] = sum / kernelSum;
     }
   }
 
-  // Find threshold based on crease strength distribution
-  let maxCrease = 0;
-  let creaseSum = 0;
-  let creaseCount = 0;
-  for (let i = 0; i < creaseStrength.length; i++) {
-    if (creaseStrength[i] > 0) {
-      maxCrease = Math.max(maxCrease, creaseStrength[i]);
-      creaseSum += creaseStrength[i];
-      creaseCount++;
+  // Vertical pass
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      let sum = 0;
+      for (let k = -2; k <= 2; k++) {
+        const py = Math.min(Math.max(y + k, 0), height - 1);
+        sum += temp[py * width + x] * kernel[k + 2];
+      }
+      blurred[y * width + x] = sum / kernelSum;
     }
   }
 
-  // Adaptive threshold based on sensitivity
+  // Multi-scale line detection with Gabor filters
+  const lineResponse = multiScaleLineDetection(blurred, width, height, interiorMask);
+
+  // Calculate adaptive threshold
+  let maxResponse = 0;
+  let sumResponse = 0;
+  let countResponse = 0;
+
+  for (let i = 0; i < lineResponse.length; i++) {
+    if (lineResponse[i] > 0 && interiorMask[i] === 255) {
+      maxResponse = Math.max(maxResponse, lineResponse[i]);
+      sumResponse += lineResponse[i];
+      countResponse++;
+    }
+  }
+
+  const avgResponse = countResponse > 0 ? sumResponse / countResponse : 0;
   const sensitivityFactor = sensitivity / 100;
-  const avgCrease = creaseCount > 0 ? creaseSum / creaseCount : 0;
-  const threshold = avgCrease + (maxCrease - avgCrease) * (1 - sensitivityFactor) * 0.5;
 
-  const result = new Uint8Array(width * height);
+  // Threshold: lower sensitivity = higher threshold = fewer lines
+  const baseThreshold = avgResponse + (maxResponse - avgResponse) * 0.3;
+  const threshold = baseThreshold * (1.5 - sensitivityFactor);
 
-  // Apply threshold with VLM guidance
+  // Apply threshold
+  const binary = new Uint8Array(width * height);
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       const idx = y * width + x;
@@ -191,24 +386,26 @@ const detectPalmLines = (imageData, sensitivity = 50, lineThickness = 2, vlmMask
         effectiveThreshold = threshold * (1 - vlmWeight * 0.3);
       }
 
-      if (creaseStrength[idx] > effectiveThreshold) {
-        result[idx] = 255;
+      if (lineResponse[idx] > effectiveThreshold) {
+        binary[idx] = 255;
       }
     }
   }
 
-  // Apply slight dilation for visibility
-  const dilated = new Uint8Array(width * height);
+  // Morphological closing to connect broken segments
+  const closed = morphologicalClose(binary, width, height, Math.max(1, lineThickness - 1));
+
+  // Apply final dilation for visibility
   const dilateRadius = Math.max(1, Math.floor(lineThickness / 2));
+  const final = new Uint8Array(width * height);
 
   for (let y = dilateRadius; y < height - dilateRadius; y++) {
     for (let x = dilateRadius; x < width - dilateRadius; x++) {
-      if (result[y * width + x] === 255) {
+      if (closed[y * width + x] === 255) {
         for (let dy = -dilateRadius; dy <= dilateRadius; dy++) {
           for (let dx = -dilateRadius; dx <= dilateRadius; dx++) {
             if (dx * dx + dy * dy <= dilateRadius * dilateRadius + 1) {
-              const targetIdx = (y + dy) * width + (x + dx);
-              dilated[targetIdx] = 255;
+              final[(y + dy) * width + (x + dx)] = 255;
             }
           }
         }
@@ -219,7 +416,7 @@ const detectPalmLines = (imageData, sensitivity = 50, lineThickness = 2, vlmMask
   // Output golden colored lines
   for (let i = 0; i < data.length; i += 4) {
     const idx = i / 4;
-    if (dilated[idx] === 255) {
+    if (final[idx] === 255) {
       output[i] = 255;
       output[i + 1] = 200;
       output[i + 2] = 100;
