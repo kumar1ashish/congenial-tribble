@@ -2,8 +2,9 @@ import React, { useState, useRef, useCallback, useEffect } from 'react';
 import {
   analyzeWithVLM,
   generateVLMGuidedMask,
-  combineEdgeDetectionWithVLM,
+  generatePalmReading,
   LINE_COLORS,
+  getLineColor,
   VLM_PROVIDERS,
 } from './vlmService';
 
@@ -57,7 +58,6 @@ const detectPalmLines = (imageData, sensitivity = 50, lineThickness = 2, vlmMask
     for (let x = 1; x < width - 1; x++) {
       const idx = y * width + x;
 
-      // Sobel kernels
       const gx = (
         -blurred2[(y - 1) * width + (x - 1)] - 2 * blurred2[y * width + (x - 1)] - blurred2[(y + 1) * width + (x - 1)] +
         blurred2[(y - 1) * width + (x + 1)] + 2 * blurred2[y * width + (x + 1)] + blurred2[(y + 1) * width + (x + 1)]
@@ -73,7 +73,7 @@ const detectPalmLines = (imageData, sensitivity = 50, lineThickness = 2, vlmMask
     }
   }
 
-  // Non-maximum suppression for thinner lines
+  // Non-maximum suppression
   const suppressed = new Float32Array(width * height);
 
   for (let y = 2; y < height - 2; y++) {
@@ -83,24 +83,22 @@ const detectPalmLines = (imageData, sensitivity = 50, lineThickness = 2, vlmMask
       const mag = edges[idx];
 
       let neighbor1, neighbor2;
-
-      // Round angle to nearest 45 degrees
       const sector = Math.round(((angle + Math.PI) / Math.PI) * 4) % 4;
 
       switch (sector) {
-        case 0: // Horizontal
+        case 0:
           neighbor1 = edges[y * width + (x - 1)];
           neighbor2 = edges[y * width + (x + 1)];
           break;
-        case 1: // Diagonal /
+        case 1:
           neighbor1 = edges[(y - 1) * width + (x + 1)];
           neighbor2 = edges[(y + 1) * width + (x - 1)];
           break;
-        case 2: // Vertical
+        case 2:
           neighbor1 = edges[(y - 1) * width + x];
           neighbor2 = edges[(y + 1) * width + x];
           break;
-        case 3: // Diagonal \
+        case 3:
           neighbor1 = edges[(y - 1) * width + (x - 1)];
           neighbor2 = edges[(y + 1) * width + (x + 1)];
           break;
@@ -114,30 +112,24 @@ const detectPalmLines = (imageData, sensitivity = 50, lineThickness = 2, vlmMask
     }
   }
 
-  // Find max edge value for thresholding
   let maxEdge = 0;
   for (let i = 0; i < suppressed.length; i++) {
     if (suppressed[i] > maxEdge) maxEdge = suppressed[i];
   }
 
-  // Adaptive thresholding based on sensitivity
   const threshold = maxEdge * (1 - sensitivity / 100) * 0.15;
   const lowThreshold = threshold * 0.4;
 
-  // Hysteresis thresholding with line enhancement
   const result = new Uint8Array(width * height);
 
-  // VLM-enhanced thresholding: lower threshold in VLM-detected areas
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       const idx = y * width + x;
 
-      // If VLM mask provided, use adaptive threshold based on VLM guidance
       let effectiveThreshold = threshold;
       let effectiveLowThreshold = lowThreshold;
 
       if (vlmMask && vlmMask[idx] > 0) {
-        // Lower threshold significantly in VLM-detected line areas
         const vlmFactor = 1 - (vlmWeight * 0.7);
         effectiveThreshold = threshold * vlmFactor;
         effectiveLowThreshold = lowThreshold * vlmFactor;
@@ -146,7 +138,6 @@ const detectPalmLines = (imageData, sensitivity = 50, lineThickness = 2, vlmMask
       if (suppressed[idx] > effectiveThreshold) {
         result[idx] = 255;
       } else if (suppressed[idx] > effectiveLowThreshold) {
-        // Check if connected to strong edge
         let connected = false;
         for (let dy = -1; dy <= 1 && !connected; dy++) {
           for (let dx = -1; dx <= 1 && !connected; dx++) {
@@ -161,7 +152,6 @@ const detectPalmLines = (imageData, sensitivity = 50, lineThickness = 2, vlmMask
         }
         if (connected) result[idx] = 255;
 
-        // Also include if in VLM-detected area and has some edge strength
         if (!connected && vlmMask && vlmMask[idx] > 0 && suppressed[idx] > lowThreshold * 0.3) {
           result[idx] = 255;
         }
@@ -169,7 +159,6 @@ const detectPalmLines = (imageData, sensitivity = 50, lineThickness = 2, vlmMask
     }
   }
 
-  // Dilate lines for visibility based on thickness setting
   const dilated = new Uint8Array(width * height);
   const dilateRadius = Math.max(1, Math.floor(lineThickness / 2));
 
@@ -187,15 +176,13 @@ const detectPalmLines = (imageData, sensitivity = 50, lineThickness = 2, vlmMask
     }
   }
 
-  // Create output with golden lines on transparent background
   for (let i = 0; i < data.length; i += 4) {
     const idx = i / 4;
     if (dilated[idx] === 255) {
-      // Golden color for lines
-      output[i] = 255;     // R
-      output[i + 1] = 200; // G
-      output[i + 2] = 100; // B
-      output[i + 3] = 255; // A
+      output[i] = 255;
+      output[i + 1] = 200;
+      output[i + 2] = 100;
+      output[i + 3] = 255;
     } else {
       output[i] = 0;
       output[i + 1] = 0;
@@ -238,6 +225,323 @@ const StarField = () => {
   );
 };
 
+// Component to draw annotated lines on canvas
+const LineAnnotationCanvas = ({ vlmResult, width, height }) => {
+  const canvasRef = useRef(null);
+
+  useEffect(() => {
+    if (!canvasRef.current || !vlmResult?.lines?.length) return;
+
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, width, height);
+
+    vlmResult.lines.forEach(line => {
+      if (!line.points || line.points.length < 2) return;
+
+      const color = getLineColor(line.name);
+      ctx.strokeStyle = color.hex;
+      ctx.lineWidth = 3;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.shadowColor = color.hex;
+      ctx.shadowBlur = 8;
+
+      // Convert percentage points to pixel coordinates
+      const pixelPoints = line.points.map(p => ({
+        x: (p.x / 100) * width,
+        y: (p.y / 100) * height,
+      }));
+
+      // Draw smooth curve using quadratic bezier
+      ctx.beginPath();
+      ctx.moveTo(pixelPoints[0].x, pixelPoints[0].y);
+
+      for (let i = 1; i < pixelPoints.length - 1; i++) {
+        const xc = (pixelPoints[i].x + pixelPoints[i + 1].x) / 2;
+        const yc = (pixelPoints[i].y + pixelPoints[i + 1].y) / 2;
+        ctx.quadraticCurveTo(pixelPoints[i].x, pixelPoints[i].y, xc, yc);
+      }
+
+      // Draw last segment
+      if (pixelPoints.length > 1) {
+        const last = pixelPoints[pixelPoints.length - 1];
+        ctx.lineTo(last.x, last.y);
+      }
+
+      ctx.stroke();
+
+      // Draw label at midpoint
+      const midIndex = Math.floor(pixelPoints.length / 2);
+      const midPoint = pixelPoints[midIndex];
+
+      ctx.shadowBlur = 0;
+      ctx.font = 'bold 11px "Cinzel", serif';
+      ctx.fillStyle = color.hex;
+      ctx.textAlign = 'center';
+
+      // Background for label
+      const labelWidth = ctx.measureText(line.name).width + 10;
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+      ctx.fillRect(midPoint.x - labelWidth / 2, midPoint.y - 20, labelWidth, 16);
+
+      ctx.fillStyle = color.hex;
+      ctx.fillText(line.name, midPoint.x, midPoint.y - 8);
+    });
+  }, [vlmResult, width, height]);
+
+  if (!vlmResult?.lines?.length) return null;
+
+  return (
+    <canvas
+      ref={canvasRef}
+      width={width}
+      height={height}
+      style={{
+        position: 'absolute',
+        top: 0,
+        left: 0,
+        width: '100%',
+        height: '100%',
+        pointerEvents: 'none',
+      }}
+    />
+  );
+};
+
+// Reading Section Component
+const ReadingSection = ({ reading, isGenerating }) => {
+  if (isGenerating) {
+    return (
+      <div style={{
+        padding: '40px 30px',
+        textAlign: 'center',
+      }}>
+        <div style={{
+          width: 50,
+          height: 50,
+          margin: '0 auto 20px',
+          border: '3px solid rgba(212, 175, 55, 0.2)',
+          borderTopColor: '#d4af37',
+          borderRadius: '50%',
+          animation: 'spin 1s linear infinite',
+        }} />
+        <p style={{
+          fontFamily: '"Cinzel", serif',
+          fontSize: '1rem',
+          letterSpacing: '0.1em',
+          color: '#d4af37',
+        }}>
+          Channeling the wisdom of the lines...
+        </p>
+      </div>
+    );
+  }
+
+  if (!reading) return null;
+
+  const renderLineReading = (lineData, icon) => {
+    if (!lineData) return null;
+    return (
+      <div style={{
+        marginBottom: 25,
+        padding: '20px',
+        background: 'rgba(20, 15, 35, 0.6)',
+        borderRadius: 12,
+        border: '1px solid rgba(212, 175, 55, 0.15)',
+      }}>
+        <h4 style={{
+          fontFamily: '"Cinzel", serif',
+          fontSize: '1rem',
+          color: '#d4af37',
+          marginTop: 0,
+          marginBottom: 12,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 10,
+        }}>
+          <span>{icon}</span>
+          {lineData.title || lineData.name}
+        </h4>
+        <p style={{
+          fontSize: '0.95rem',
+          lineHeight: 1.8,
+          color: 'rgba(232, 220, 200, 0.85)',
+          margin: 0,
+        }}>
+          {lineData.interpretation}
+        </p>
+      </div>
+    );
+  };
+
+  return (
+    <div style={{
+      padding: '30px',
+      animation: 'fadeIn 0.8s ease-out',
+    }}>
+      <style>{`
+        @keyframes fadeIn {
+          from { opacity: 0; transform: translateY(20px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+      `}</style>
+
+      {/* Opening */}
+      {reading.opening && (
+        <div style={{
+          textAlign: 'center',
+          marginBottom: 30,
+          padding: '25px',
+          background: 'linear-gradient(135deg, rgba(139, 105, 20, 0.15), rgba(212, 175, 55, 0.1))',
+          borderRadius: 15,
+          border: '1px solid rgba(212, 175, 55, 0.25)',
+        }}>
+          <p style={{
+            fontFamily: '"Cormorant Garamond", serif',
+            fontSize: '1.15rem',
+            fontStyle: 'italic',
+            lineHeight: 1.8,
+            color: '#f5d76e',
+            margin: 0,
+          }}>
+            "{reading.opening}"
+          </p>
+        </div>
+      )}
+
+      {/* Main Line Readings */}
+      {renderLineReading(reading.heartLine, '❤')}
+      {renderLineReading(reading.headLine, '🧠')}
+      {renderLineReading(reading.lifeLine, '✨')}
+
+      {/* Other Lines */}
+      {reading.otherLines && reading.otherLines.length > 0 && (
+        <div style={{ marginBottom: 25 }}>
+          {reading.otherLines.map((line, idx) => (
+            <div key={idx} style={{
+              marginBottom: 15,
+              padding: '15px 20px',
+              background: 'rgba(20, 15, 35, 0.5)',
+              borderRadius: 10,
+              border: '1px solid rgba(212, 175, 55, 0.1)',
+            }}>
+              <h5 style={{
+                fontFamily: '"Cinzel", serif',
+                fontSize: '0.9rem',
+                color: '#d4af37',
+                marginTop: 0,
+                marginBottom: 8,
+              }}>
+                {line.title || line.name}
+              </h5>
+              <p style={{
+                fontSize: '0.9rem',
+                lineHeight: 1.7,
+                color: 'rgba(232, 220, 200, 0.8)',
+                margin: 0,
+              }}>
+                {line.interpretation}
+              </p>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Special Features */}
+      {reading.specialFeatures && (
+        <div style={{
+          marginBottom: 25,
+          padding: '15px 20px',
+          background: 'rgba(100, 80, 150, 0.15)',
+          borderRadius: 10,
+          border: '1px solid rgba(150, 120, 200, 0.2)',
+        }}>
+          <h5 style={{
+            fontFamily: '"Cinzel", serif',
+            fontSize: '0.9rem',
+            color: '#c0a0ff',
+            marginTop: 0,
+            marginBottom: 8,
+          }}>
+            Special Markings
+          </h5>
+          <p style={{
+            fontSize: '0.9rem',
+            lineHeight: 1.7,
+            color: 'rgba(232, 220, 200, 0.8)',
+            margin: 0,
+          }}>
+            {reading.specialFeatures}
+          </p>
+        </div>
+      )}
+
+      {/* Overall Reading */}
+      {reading.overallReading && (
+        <div style={{
+          marginBottom: 25,
+          padding: '25px',
+          background: 'linear-gradient(135deg, rgba(20, 15, 35, 0.8), rgba(30, 25, 50, 0.6))',
+          borderRadius: 15,
+          border: '1px solid rgba(212, 175, 55, 0.2)',
+        }}>
+          <h4 style={{
+            fontFamily: '"Cinzel", serif',
+            fontSize: '1.1rem',
+            color: '#f5d76e',
+            marginTop: 0,
+            marginBottom: 15,
+            textAlign: 'center',
+          }}>
+            ✧ The Complete Picture ✧
+          </h4>
+          <p style={{
+            fontSize: '1rem',
+            lineHeight: 1.9,
+            color: 'rgba(232, 220, 200, 0.9)',
+            margin: 0,
+            textAlign: 'center',
+          }}>
+            {reading.overallReading}
+          </p>
+        </div>
+      )}
+
+      {/* Guidance */}
+      {reading.guidance && (
+        <div style={{
+          padding: '25px',
+          background: 'linear-gradient(135deg, rgba(139, 105, 20, 0.2), rgba(212, 175, 55, 0.1))',
+          borderRadius: 15,
+          border: '2px solid rgba(212, 175, 55, 0.3)',
+          textAlign: 'center',
+        }}>
+          <h4 style={{
+            fontFamily: '"Cinzel", serif',
+            fontSize: '1rem',
+            color: '#d4af37',
+            marginTop: 0,
+            marginBottom: 12,
+          }}>
+            Guidance for Your Path
+          </h4>
+          <p style={{
+            fontFamily: '"Cormorant Garamond", serif',
+            fontSize: '1.1rem',
+            fontStyle: 'italic',
+            lineHeight: 1.8,
+            color: '#f5d76e',
+            margin: 0,
+          }}>
+            {reading.guidance}
+          </p>
+        </div>
+      )}
+    </div>
+  );
+};
+
 export default function PalmReader() {
   const [image, setImage] = useState(null);
   const [processedImage, setProcessedImage] = useState(null);
@@ -246,6 +550,7 @@ export default function PalmReader() {
   const [sensitivity, setSensitivity] = useState(60);
   const [lineThickness, setLineThickness] = useState(2);
   const [showOriginal, setShowOriginal] = useState(false);
+  const [imageDimensions, setImageDimensions] = useState({ width: 0, height: 0 });
   const canvasRef = useRef(null);
   const fileInputRef = useRef(null);
 
@@ -259,9 +564,13 @@ export default function PalmReader() {
   const [vlmProcessing, setVlmProcessing] = useState(false);
   const [vlmError, setVlmError] = useState(null);
   const [showSettings, setShowSettings] = useState(false);
-  const [showLineLabels, setShowLineLabels] = useState(true);
+  const [showLineAnnotations, setShowLineAnnotations] = useState(true);
 
-  // Save API key to localStorage when changed
+  // Reading state
+  const [palmReading, setPalmReading] = useState(null);
+  const [isGeneratingReading, setIsGeneratingReading] = useState(false);
+  const [showReading, setShowReading] = useState(false);
+
   useEffect(() => {
     if (apiKey) {
       localStorage.setItem('vlm_api_key', apiKey);
@@ -276,26 +585,24 @@ export default function PalmReader() {
       const canvas = canvasRef.current;
       const ctx = canvas.getContext('2d');
 
-      // Scale image to reasonable size for processing
       const maxSize = 800;
       let { width, height } = img;
       if (width > maxSize || height > maxSize) {
         const ratio = Math.min(maxSize / width, maxSize / height);
-        width *= ratio;
-        height *= ratio;
+        width = Math.round(width * ratio);
+        height = Math.round(height * ratio);
       }
+
+      setImageDimensions({ width, height });
 
       canvas.width = width;
       canvas.height = height;
       ctx.drawImage(img, 0, 0, width, height);
 
       const imageData = ctx.getImageData(0, 0, width, height);
-
-      // Pass VLM mask if available and VLM is enabled
       const maskToUse = vlmEnabled && currentVlmMask ? currentVlmMask : null;
       const processed = detectPalmLines(imageData, sens, thickness, maskToUse, currentVlmWeight);
 
-      // Create processed image URL
       const tempCanvas = document.createElement('canvas');
       tempCanvas.width = width;
       tempCanvas.height = height;
@@ -308,7 +615,6 @@ export default function PalmReader() {
     img.src = imgSrc;
   }, [sensitivity, lineThickness, vlmMask, vlmWeight, vlmEnabled]);
 
-  // VLM analysis function
   const runVLMAnalysis = useCallback(async (imgSrc) => {
     if (!apiKey) {
       setVlmError('Please enter an API key in settings');
@@ -323,9 +629,7 @@ export default function PalmReader() {
       const result = await analyzeWithVLM(imgSrc, vlmProvider, apiKey);
       setVlmResult(result);
 
-      // Generate VLM-guided mask if we have line data
       if (result.lines && result.lines.length > 0) {
-        // Get image dimensions
         const img = new Image();
         img.onload = () => {
           const maxSize = 800;
@@ -338,8 +642,6 @@ export default function PalmReader() {
 
           const mask = generateVLMGuidedMask(result, width, height, 12);
           setVlmMask(mask);
-
-          // Reprocess image with VLM guidance
           processImage(imgSrc, sensitivity, lineThickness, mask, vlmWeight);
         };
         img.src = imgSrc;
@@ -353,12 +655,36 @@ export default function PalmReader() {
     }
   }, [apiKey, vlmProvider, sensitivity, lineThickness, vlmWeight, processImage]);
 
+  const generateReading = useCallback(async () => {
+    if (!vlmResult || !apiKey) {
+      setVlmError('Please analyze the palm first with AI Vision');
+      return;
+    }
+
+    setIsGeneratingReading(true);
+    setShowReading(true);
+
+    try {
+      const reading = await generatePalmReading(vlmResult, vlmProvider, apiKey);
+      setPalmReading(reading);
+    } catch (err) {
+      console.error('Reading generation error:', err);
+      setVlmError(err.message);
+    }
+
+    setIsGeneratingReading(false);
+  }, [vlmResult, vlmProvider, apiKey]);
+
   const handleFileUpload = (e) => {
     const file = e.target.files?.[0];
     if (file) {
       const reader = new FileReader();
       reader.onload = (event) => {
         setImage(event.target.result);
+        setVlmResult(null);
+        setVlmMask(null);
+        setPalmReading(null);
+        setShowReading(false);
         processImage(event.target.result);
       };
       reader.readAsDataURL(file);
@@ -372,6 +698,10 @@ export default function PalmReader() {
       const reader = new FileReader();
       reader.onload = (event) => {
         setImage(event.target.result);
+        setVlmResult(null);
+        setVlmMask(null);
+        setPalmReading(null);
+        setShowReading(false);
         processImage(event.target.result);
       };
       reader.readAsDataURL(file);
@@ -388,7 +718,6 @@ export default function PalmReader() {
     }
   }, [sensitivity, lineThickness, vlmWeight, vlmEnabled]);
 
-  // Rerun VLM analysis when VLM is enabled and we have an image
   useEffect(() => {
     if (vlmEnabled && image && !vlmResult && apiKey) {
       runVLMAnalysis(image);
@@ -432,6 +761,10 @@ export default function PalmReader() {
           100% { clip-path: circle(100% at 50% 50%); }
         }
 
+        @keyframes spin {
+          to { transform: rotate(360deg); }
+        }
+
         .mystical-border {
           position: relative;
         }
@@ -468,11 +801,58 @@ export default function PalmReader() {
           height: 4px;
           border-radius: 2px;
         }
+
+        .btn-primary {
+          padding: 12px 25px;
+          background: linear-gradient(135deg, rgba(212, 175, 55, 0.3), rgba(139, 105, 20, 0.3));
+          border: 1px solid rgba(212, 175, 55, 0.5);
+          border-radius: 30px;
+          color: #d4af37;
+          font-family: "Cinzel", serif;
+          font-size: 0.85rem;
+          letter-spacing: 0.08em;
+          cursor: pointer;
+          transition: all 0.3s ease;
+        }
+
+        .btn-primary:hover {
+          background: linear-gradient(135deg, rgba(212, 175, 55, 0.4), rgba(139, 105, 20, 0.4));
+          transform: translateY(-1px);
+        }
+
+        .btn-secondary {
+          padding: 12px 25px;
+          background: transparent;
+          border: 1px solid rgba(212, 175, 55, 0.4);
+          border-radius: 30px;
+          color: rgba(212, 175, 55, 0.8);
+          font-family: "Cinzel", serif;
+          font-size: 0.85rem;
+          letter-spacing: 0.08em;
+          cursor: pointer;
+          transition: all 0.3s ease;
+        }
+
+        .btn-ai {
+          padding: 12px 25px;
+          background: linear-gradient(135deg, rgba(100, 150, 255, 0.3), rgba(75, 100, 200, 0.3));
+          border: 1px solid rgba(100, 150, 255, 0.5);
+          border-radius: 30px;
+          color: #a0c4ff;
+          font-family: "Cinzel", serif;
+          font-size: 0.85rem;
+          letter-spacing: 0.08em;
+          cursor: pointer;
+          transition: all 0.3s ease;
+        }
+
+        .btn-ai:hover {
+          background: linear-gradient(135deg, rgba(100, 150, 255, 0.4), rgba(75, 100, 200, 0.4));
+        }
       `}</style>
 
       <StarField />
 
-      {/* Ambient glow effects */}
       <div style={{
         position: 'absolute',
         top: '20%',
@@ -497,20 +877,20 @@ export default function PalmReader() {
       }} />
 
       <div style={{
-        maxWidth: 1000,
+        maxWidth: 1200,
         margin: '0 auto',
         padding: '40px 20px',
         position: 'relative',
         zIndex: 1,
       }}>
         {/* Header */}
-        <header style={{ textAlign: 'center', marginBottom: 50 }}>
+        <header style={{ textAlign: 'center', marginBottom: 40 }}>
           <div style={{
             display: 'inline-block',
-            marginBottom: 20,
+            marginBottom: 15,
             animation: 'float 6s ease-in-out infinite',
           }}>
-            <svg width="60" height="60" viewBox="0 0 100 100" fill="none">
+            <svg width="50" height="50" viewBox="0 0 100 100" fill="none">
               <circle cx="50" cy="50" r="45" stroke="url(#goldGrad)" strokeWidth="2" fill="none" opacity="0.6"/>
               <circle cx="50" cy="50" r="35" stroke="url(#goldGrad)" strokeWidth="1" fill="none" opacity="0.4"/>
               <path d="M50 20 L55 40 L75 40 L60 52 L65 72 L50 60 L35 72 L40 52 L25 40 L45 40 Z" fill="url(#goldGrad)" opacity="0.8"/>
@@ -526,36 +906,30 @@ export default function PalmReader() {
 
           <h1 style={{
             fontFamily: '"Cinzel", serif',
-            fontSize: 'clamp(2rem, 5vw, 3.5rem)',
+            fontSize: 'clamp(1.8rem, 4vw, 3rem)',
             fontWeight: 400,
             letterSpacing: '0.15em',
             background: 'linear-gradient(135deg, #8b6914 0%, #f5d76e 30%, #d4af37 50%, #f5d76e 70%, #8b6914 100%)',
             backgroundClip: 'text',
             WebkitBackgroundClip: 'text',
             WebkitTextFillColor: 'transparent',
-            marginBottom: 15,
-            textShadow: '0 0 30px rgba(212, 175, 55, 0.3)',
+            marginBottom: 10,
           }}>
             PALM ORACLE
           </h1>
 
           <p style={{
-            fontSize: '1.1rem',
+            fontSize: '1rem',
             fontWeight: 300,
-            letterSpacing: '0.1em',
+            letterSpacing: '0.08em',
             color: 'rgba(232, 220, 200, 0.7)',
-            maxWidth: 500,
-            margin: '0 auto',
-            lineHeight: 1.8,
           }}>
-            Reveal the sacred lines inscribed upon your palm
+            AI-Powered Palm Reading & Line Analysis
           </p>
         </header>
 
-        {/* Hidden canvas for processing */}
         <canvas ref={canvasRef} style={{ display: 'none' }} />
 
-        {/* Upload Area */}
         {!image ? (
           <div
             className="upload-zone mystical-border"
@@ -565,12 +939,14 @@ export default function PalmReader() {
             style={{
               border: '2px dashed rgba(212, 175, 55, 0.4)',
               borderRadius: 20,
-              padding: '80px 40px',
+              padding: '60px 40px',
               textAlign: 'center',
               cursor: 'pointer',
               background: 'rgba(20, 15, 30, 0.6)',
               backdropFilter: 'blur(10px)',
               transition: 'all 0.4s ease',
+              maxWidth: 600,
+              margin: '0 auto',
             }}
           >
             <input
@@ -581,590 +957,363 @@ export default function PalmReader() {
               style={{ display: 'none' }}
             />
 
-            <div style={{ marginBottom: 30 }}>
-              <svg width="80" height="80" viewBox="0 0 100 100" fill="none" style={{ opacity: 0.7 }}>
+            <div style={{ marginBottom: 25 }}>
+              <svg width="70" height="70" viewBox="0 0 100 100" fill="none" style={{ opacity: 0.7 }}>
                 <path d="M50 10 C30 10 15 30 15 50 C15 75 30 90 50 90 C70 90 85 75 85 50 C85 30 70 10 50 10"
                       stroke="#d4af37" strokeWidth="2" fill="none"/>
                 <path d="M25 50 Q35 35 50 40 Q65 45 75 50" stroke="#d4af37" strokeWidth="1.5" fill="none" opacity="0.6"/>
                 <path d="M30 65 Q45 55 50 60 Q55 65 70 55" stroke="#d4af37" strokeWidth="1.5" fill="none" opacity="0.6"/>
                 <path d="M50 25 Q48 45 50 70" stroke="#d4af37" strokeWidth="1.5" fill="none" opacity="0.6"/>
-                <circle cx="40" cy="45" r="3" fill="#d4af37" opacity="0.5"/>
-                <circle cx="60" cy="48" r="3" fill="#d4af37" opacity="0.5"/>
-                <circle cx="50" cy="60" r="3" fill="#d4af37" opacity="0.5"/>
               </svg>
             </div>
 
             <h3 style={{
               fontFamily: '"Cinzel", serif',
-              fontSize: '1.3rem',
+              fontSize: '1.2rem',
               fontWeight: 400,
               letterSpacing: '0.1em',
               color: '#d4af37',
-              marginBottom: 15,
+              marginBottom: 12,
             }}>
               Present Your Palm
             </h3>
 
             <p style={{
               color: 'rgba(232, 220, 200, 0.6)',
-              fontSize: '0.95rem',
+              fontSize: '0.9rem',
               lineHeight: 1.6,
             }}>
               Drop an image here or click to select<br/>
-              <span style={{ fontSize: '0.85rem', opacity: 0.7 }}>For best results, use a clear, well-lit photo of your palm</span>
+              <span style={{ fontSize: '0.8rem', opacity: 0.7 }}>For best results, use a clear, well-lit photo</span>
             </p>
           </div>
         ) : (
-          <>
-            {/* Image Display */}
-            <div className="mystical-border" style={{
-              borderRadius: 20,
-              overflow: 'hidden',
-              background: 'rgba(20, 15, 30, 0.8)',
-              backdropFilter: 'blur(10px)',
-            }}>
-              <div style={{
-                position: 'relative',
-                display: 'flex',
-                justifyContent: 'center',
-                alignItems: 'center',
-                minHeight: 400,
-                padding: 20,
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: showReading ? '1fr 1fr' : '1fr',
+            gap: 30,
+            alignItems: 'start',
+          }}>
+            {/* Left Column - Image and Controls */}
+            <div>
+              <div className="mystical-border" style={{
+                borderRadius: 20,
+                overflow: 'hidden',
+                background: 'rgba(20, 15, 30, 0.8)',
+                backdropFilter: 'blur(10px)',
               }}>
-                {isProcessing && (
-                  <div style={{
-                    position: 'absolute',
-                    inset: 0,
-                    display: 'flex',
-                    flexDirection: 'column',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    background: 'rgba(10, 10, 18, 0.9)',
-                    zIndex: 10,
-                  }}>
-                    <div style={{
-                      width: 60,
-                      height: 60,
-                      border: '3px solid rgba(212, 175, 55, 0.2)',
-                      borderTopColor: '#d4af37',
-                      borderRadius: '50%',
-                      animation: 'spin 1s linear infinite',
-                    }} />
-                    <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
-                    <p style={{
-                      marginTop: 20,
-                      fontFamily: '"Cinzel", serif',
-                      letterSpacing: '0.1em',
-                      color: '#d4af37',
-                      animation: 'pulse 2s ease-in-out infinite',
-                    }}>
-                      Reading the lines...
-                    </p>
-                  </div>
-                )}
-
-                <div style={{ position: 'relative', display: 'inline-block' }}>
-                  <img
-                    src={image}
-                    alt="Palm"
-                    style={{
-                      maxWidth: '100%',
-                      maxHeight: 500,
-                      borderRadius: 10,
-                      display: 'block',
-                    }}
-                  />
-
-                  {processedImage && showOverlay && !showOriginal && (
-                    <img
-                      src={processedImage}
-                      alt="Palm lines overlay"
-                      style={{
-                        position: 'absolute',
-                        top: 0,
-                        left: 0,
-                        width: '100%',
-                        height: '100%',
-                        borderRadius: 10,
-                        animation: 'revealLines 1.5s ease-out forwards',
-                        mixBlendMode: 'screen',
-                      }}
-                    />
-                  )}
-
-                  {/* VLM Line Labels Overlay */}
-                  {vlmEnabled && showLineLabels && vlmResult && vlmResult.lines && vlmResult.lines.length > 0 && !showOriginal && (
+                <div style={{
+                  position: 'relative',
+                  display: 'flex',
+                  justifyContent: 'center',
+                  alignItems: 'center',
+                  minHeight: 350,
+                  padding: 15,
+                  background: 'rgba(10, 10, 18, 0.5)',
+                }}>
+                  {(isProcessing || vlmProcessing) && (
                     <div style={{
                       position: 'absolute',
-                      top: 0,
-                      left: 0,
-                      width: '100%',
-                      height: '100%',
-                      pointerEvents: 'none',
+                      inset: 0,
+                      display: 'flex',
+                      flexDirection: 'column',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      background: 'rgba(10, 10, 18, 0.9)',
+                      zIndex: 10,
                     }}>
-                      {vlmResult.lines.map((line, idx) => {
-                        const color = LINE_COLORS[line.name] || LINE_COLORS.default;
-                        // Position label at the midpoint of the line
-                        const labelX = line.startX !== undefined && line.endX !== undefined
-                          ? (line.startX + line.endX) / 2
-                          : 50;
-                        const labelY = line.startY !== undefined && line.endY !== undefined
-                          ? Math.min(line.startY, line.endY) - 5
-                          : 50;
-
-                        return (
-                          <div
-                            key={idx}
-                            style={{
-                              position: 'absolute',
-                              left: `${labelX}%`,
-                              top: `${labelY}%`,
-                              transform: 'translate(-50%, -100%)',
-                              padding: '3px 8px',
-                              background: `rgba(${color.r}, ${color.g}, ${color.b}, 0.85)`,
-                              borderRadius: 4,
-                              fontSize: '0.65rem',
-                              fontWeight: 600,
-                              color: '#fff',
-                              textShadow: '0 1px 2px rgba(0,0,0,0.5)',
-                              whiteSpace: 'nowrap',
-                              zIndex: 10,
-                            }}
-                          >
-                            {line.name}
-                          </div>
-                        );
-                      })}
+                      <div style={{
+                        width: 50,
+                        height: 50,
+                        border: '3px solid rgba(212, 175, 55, 0.2)',
+                        borderTopColor: vlmProcessing ? '#a0c4ff' : '#d4af37',
+                        borderRadius: '50%',
+                        animation: 'spin 1s linear infinite',
+                      }} />
+                      <p style={{
+                        marginTop: 15,
+                        fontFamily: '"Cinzel", serif',
+                        letterSpacing: '0.1em',
+                        color: vlmProcessing ? '#a0c4ff' : '#d4af37',
+                      }}>
+                        {vlmProcessing ? 'AI analyzing palm lines...' : 'Processing...'}
+                      </p>
                     </div>
                   )}
-                </div>
-              </div>
 
-              {/* Controls */}
-              <div style={{
-                padding: '25px 30px',
-                borderTop: '1px solid rgba(212, 175, 55, 0.2)',
-                background: 'rgba(15, 12, 25, 0.5)',
-              }}>
-                {/* Toggle Controls */}
-                <div style={{
-                  display: 'flex',
-                  flexWrap: 'wrap',
-                  gap: 15,
-                  marginBottom: 25,
-                  justifyContent: 'center',
-                }}>
-                  <button
-                    onClick={() => setShowOverlay(!showOverlay)}
-                    style={{
-                      padding: '12px 25px',
-                      background: showOverlay
-                        ? 'linear-gradient(135deg, rgba(212, 175, 55, 0.3), rgba(139, 105, 20, 0.3))'
-                        : 'transparent',
-                      border: '1px solid rgba(212, 175, 55, 0.5)',
-                      borderRadius: 30,
-                      color: '#d4af37',
-                      fontFamily: '"Cinzel", serif',
-                      fontSize: '0.85rem',
-                      letterSpacing: '0.08em',
-                      cursor: 'pointer',
-                      transition: 'all 0.3s ease',
-                    }}
-                  >
-                    {showOverlay ? '✧ Lines Visible' : '○ Lines Hidden'}
-                  </button>
+                  <div style={{ position: 'relative', display: 'inline-block' }}>
+                    <img
+                      src={image}
+                      alt="Palm"
+                      style={{
+                        maxWidth: '100%',
+                        maxHeight: 450,
+                        borderRadius: 10,
+                        display: 'block',
+                      }}
+                    />
 
-                  <button
-                    onMouseDown={() => setShowOriginal(true)}
-                    onMouseUp={() => setShowOriginal(false)}
-                    onMouseLeave={() => setShowOriginal(false)}
-                    onTouchStart={() => setShowOriginal(true)}
-                    onTouchEnd={() => setShowOriginal(false)}
-                    style={{
-                      padding: '12px 25px',
-                      background: 'transparent',
-                      border: '1px solid rgba(212, 175, 55, 0.5)',
-                      borderRadius: 30,
-                      color: '#d4af37',
-                      fontFamily: '"Cinzel", serif',
-                      fontSize: '0.85rem',
-                      letterSpacing: '0.08em',
-                      cursor: 'pointer',
-                      transition: 'all 0.3s ease',
-                    }}
-                  >
-                    Hold to View Original
-                  </button>
+                    {processedImage && showOverlay && !showOriginal && (
+                      <img
+                        src={processedImage}
+                        alt="Palm lines overlay"
+                        style={{
+                          position: 'absolute',
+                          top: 0,
+                          left: 0,
+                          width: '100%',
+                          height: '100%',
+                          borderRadius: 10,
+                          animation: 'revealLines 1.5s ease-out forwards',
+                          mixBlendMode: 'screen',
+                        }}
+                      />
+                    )}
 
-                  <button
-                    onClick={() => {
-                      setImage(null);
-                      setProcessedImage(null);
-                      setVlmResult(null);
-                      setVlmMask(null);
-                      setVlmError(null);
-                    }}
-                    style={{
-                      padding: '12px 25px',
-                      background: 'transparent',
-                      border: '1px solid rgba(150, 100, 100, 0.5)',
-                      borderRadius: 30,
-                      color: 'rgba(200, 150, 150, 0.8)',
-                      fontFamily: '"Cinzel", serif',
-                      fontSize: '0.85rem',
-                      letterSpacing: '0.08em',
-                      cursor: 'pointer',
-                      transition: 'all 0.3s ease',
-                    }}
-                  >
-                    New Reading
-                  </button>
-
-                  <button
-                    onClick={() => setVlmEnabled(!vlmEnabled)}
-                    style={{
-                      padding: '12px 25px',
-                      background: vlmEnabled
-                        ? 'linear-gradient(135deg, rgba(100, 150, 255, 0.3), rgba(75, 100, 200, 0.3))'
-                        : 'transparent',
-                      border: '1px solid rgba(100, 150, 255, 0.5)',
-                      borderRadius: 30,
-                      color: vlmEnabled ? '#a0c4ff' : 'rgba(160, 196, 255, 0.7)',
-                      fontFamily: '"Cinzel", serif',
-                      fontSize: '0.85rem',
-                      letterSpacing: '0.08em',
-                      cursor: 'pointer',
-                      transition: 'all 0.3s ease',
-                    }}
-                  >
-                    {vlmEnabled ? '✦ AI Vision On' : '○ AI Vision Off'}
-                  </button>
-
-                  <button
-                    onClick={() => setShowSettings(!showSettings)}
-                    style={{
-                      padding: '12px 20px',
-                      background: 'transparent',
-                      border: '1px solid rgba(212, 175, 55, 0.3)',
-                      borderRadius: 30,
-                      color: 'rgba(212, 175, 55, 0.7)',
-                      fontFamily: '"Cinzel", serif',
-                      fontSize: '0.85rem',
-                      letterSpacing: '0.08em',
-                      cursor: 'pointer',
-                      transition: 'all 0.3s ease',
-                    }}
-                  >
-                    Settings
-                  </button>
-                </div>
-
-                {/* VLM Status/Error */}
-                {vlmEnabled && (vlmProcessing || vlmError) && (
-                  <div style={{
-                    marginBottom: 20,
-                    padding: '12px 20px',
-                    background: vlmError ? 'rgba(200, 100, 100, 0.15)' : 'rgba(100, 150, 255, 0.15)',
-                    borderRadius: 10,
-                    border: `1px solid ${vlmError ? 'rgba(200, 100, 100, 0.3)' : 'rgba(100, 150, 255, 0.3)'}`,
-                    textAlign: 'center',
-                    fontSize: '0.85rem',
-                  }}>
-                    {vlmProcessing ? (
-                      <span style={{ color: '#a0c4ff' }}>Analyzing palm with AI vision model...</span>
-                    ) : vlmError ? (
-                      <span style={{ color: '#ffb0b0' }}>{vlmError}</span>
-                    ) : null}
+                    {/* AI Line Annotations */}
+                    {vlmEnabled && showLineAnnotations && vlmResult && !showOriginal && (
+                      <LineAnnotationCanvas
+                        vlmResult={vlmResult}
+                        width={imageDimensions.width}
+                        height={imageDimensions.height}
+                      />
+                    )}
                   </div>
-                )}
+                </div>
 
-                {/* VLM Detected Lines */}
-                {vlmEnabled && vlmResult && vlmResult.lines && vlmResult.lines.length > 0 && (
+                {/* Controls */}
+                <div style={{
+                  padding: '20px',
+                  borderTop: '1px solid rgba(212, 175, 55, 0.2)',
+                  background: 'rgba(15, 12, 25, 0.5)',
+                }}>
+                  {/* Main Buttons */}
                   <div style={{
+                    display: 'flex',
+                    flexWrap: 'wrap',
+                    gap: 10,
                     marginBottom: 20,
-                    padding: '15px 20px',
-                    background: 'rgba(100, 150, 255, 0.1)',
-                    borderRadius: 12,
-                    border: '1px solid rgba(100, 150, 255, 0.2)',
+                    justifyContent: 'center',
                   }}>
+                    <button
+                      className={showOverlay ? 'btn-primary' : 'btn-secondary'}
+                      onClick={() => setShowOverlay(!showOverlay)}
+                    >
+                      {showOverlay ? '✧ Lines Visible' : '○ Lines Hidden'}
+                    </button>
+
+                    <button
+                      className="btn-secondary"
+                      onMouseDown={() => setShowOriginal(true)}
+                      onMouseUp={() => setShowOriginal(false)}
+                      onMouseLeave={() => setShowOriginal(false)}
+                      onTouchStart={() => setShowOriginal(true)}
+                      onTouchEnd={() => setShowOriginal(false)}
+                    >
+                      Hold for Original
+                    </button>
+
+                    <button
+                      className={vlmEnabled ? 'btn-ai' : 'btn-secondary'}
+                      onClick={() => setVlmEnabled(!vlmEnabled)}
+                      style={{
+                        borderColor: 'rgba(100, 150, 255, 0.5)',
+                        color: vlmEnabled ? '#a0c4ff' : 'rgba(160, 196, 255, 0.7)',
+                      }}
+                    >
+                      {vlmEnabled ? '✦ AI Vision On' : '○ AI Vision'}
+                    </button>
+
+                    <button
+                      className="btn-secondary"
+                      onClick={() => setShowSettings(!showSettings)}
+                      style={{ padding: '12px 18px' }}
+                    >
+                      ⚙
+                    </button>
+                  </div>
+
+                  {/* Error Display */}
+                  {vlmError && (
                     <div style={{
-                      display: 'flex',
-                      justifyContent: 'space-between',
-                      alignItems: 'center',
-                      marginBottom: 12,
+                      marginBottom: 15,
+                      padding: '10px 15px',
+                      background: 'rgba(200, 100, 100, 0.15)',
+                      borderRadius: 8,
+                      border: '1px solid rgba(200, 100, 100, 0.3)',
+                      fontSize: '0.85rem',
+                      color: '#ffb0b0',
+                      textAlign: 'center',
+                    }}>
+                      {vlmError}
+                    </div>
+                  )}
+
+                  {/* Settings Panel */}
+                  {showSettings && (
+                    <div style={{
+                      marginBottom: 20,
+                      padding: '15px',
+                      background: 'rgba(30, 25, 45, 0.8)',
+                      borderRadius: 10,
+                      border: '1px solid rgba(212, 175, 55, 0.2)',
                     }}>
                       <h4 style={{
                         fontFamily: '"Cinzel", serif',
                         fontSize: '0.9rem',
-                        letterSpacing: '0.08em',
-                        color: '#a0c4ff',
-                        margin: 0,
+                        color: '#d4af37',
+                        marginTop: 0,
+                        marginBottom: 12,
                       }}>
-                        AI Detected Lines
+                        AI Settings
                       </h4>
+
+                      <div style={{ marginBottom: 12 }}>
+                        <label style={{ display: 'block', marginBottom: 5, fontSize: '0.8rem', color: 'rgba(232, 220, 200, 0.7)' }}>
+                          Provider
+                        </label>
+                        <select
+                          value={vlmProvider}
+                          onChange={(e) => setVlmProvider(e.target.value)}
+                          style={{
+                            width: '100%',
+                            padding: '8px 12px',
+                            background: 'rgba(20, 15, 30, 0.8)',
+                            border: '1px solid rgba(212, 175, 55, 0.3)',
+                            borderRadius: 6,
+                            color: '#e8dcc8',
+                            fontSize: '0.85rem',
+                          }}
+                        >
+                          <option value={VLM_PROVIDERS.OPENAI}>OpenAI (GPT-4o)</option>
+                          <option value={VLM_PROVIDERS.ANTHROPIC}>Anthropic (Claude)</option>
+                        </select>
+                      </div>
+
+                      <div style={{ marginBottom: 12 }}>
+                        <label style={{ display: 'block', marginBottom: 5, fontSize: '0.8rem', color: 'rgba(232, 220, 200, 0.7)' }}>
+                          API Key
+                        </label>
+                        <input
+                          type="password"
+                          value={apiKey}
+                          onChange={(e) => setApiKey(e.target.value)}
+                          placeholder="Enter API key"
+                          style={{
+                            width: '100%',
+                            padding: '8px 12px',
+                            background: 'rgba(20, 15, 30, 0.8)',
+                            border: '1px solid rgba(212, 175, 55, 0.3)',
+                            borderRadius: 6,
+                            color: '#e8dcc8',
+                            fontSize: '0.85rem',
+                            boxSizing: 'border-box',
+                          }}
+                        />
+                      </div>
+
+                      {vlmEnabled && apiKey && (
+                        <button
+                          className="btn-ai"
+                          onClick={() => runVLMAnalysis(image)}
+                          disabled={vlmProcessing}
+                          style={{ width: '100%', marginTop: 5 }}
+                        >
+                          {vlmProcessing ? 'Analyzing...' : 'Re-analyze Palm'}
+                        </button>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Detected Lines Display */}
+                  {vlmEnabled && vlmResult && vlmResult.lines && vlmResult.lines.length > 0 && (
+                    <div style={{
+                      marginBottom: 20,
+                      padding: '15px',
+                      background: 'rgba(100, 150, 255, 0.08)',
+                      borderRadius: 10,
+                      border: '1px solid rgba(100, 150, 255, 0.2)',
+                    }}>
+                      <div style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        marginBottom: 10,
+                      }}>
+                        <span style={{ fontSize: '0.85rem', color: '#a0c4ff', fontFamily: '"Cinzel", serif' }}>
+                          Detected Lines
+                        </span>
+                        <button
+                          onClick={() => setShowLineAnnotations(!showLineAnnotations)}
+                          style={{
+                            padding: '4px 10px',
+                            background: showLineAnnotations ? 'rgba(100, 150, 255, 0.2)' : 'transparent',
+                            border: '1px solid rgba(100, 150, 255, 0.3)',
+                            borderRadius: 12,
+                            color: '#a0c4ff',
+                            fontSize: '0.7rem',
+                            cursor: 'pointer',
+                          }}
+                        >
+                          {showLineAnnotations ? 'Annotations On' : 'Annotations Off'}
+                        </button>
+                      </div>
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                        {vlmResult.lines.map((line, idx) => {
+                          const color = getLineColor(line.name);
+                          return (
+                            <span
+                              key={idx}
+                              style={{
+                                padding: '3px 10px',
+                                background: `rgba(${color.r}, ${color.g}, ${color.b}, 0.2)`,
+                                border: `1px solid ${color.hex}`,
+                                borderRadius: 12,
+                                fontSize: '0.75rem',
+                                color: color.hex,
+                              }}
+                            >
+                              {line.name}
+                            </span>
+                          );
+                        })}
+                      </div>
+
+                      {/* Generate Reading Button */}
                       <button
-                        onClick={() => setShowLineLabels(!showLineLabels)}
+                        className="btn-primary"
+                        onClick={generateReading}
+                        disabled={isGeneratingReading}
                         style={{
-                          padding: '5px 12px',
-                          background: showLineLabels ? 'rgba(100, 150, 255, 0.2)' : 'transparent',
-                          border: '1px solid rgba(100, 150, 255, 0.3)',
-                          borderRadius: 15,
-                          color: '#a0c4ff',
-                          fontSize: '0.75rem',
-                          cursor: 'pointer',
+                          width: '100%',
+                          marginTop: 15,
+                          background: 'linear-gradient(135deg, rgba(212, 175, 55, 0.4), rgba(139, 105, 20, 0.4))',
                         }}
                       >
-                        {showLineLabels ? 'Labels On' : 'Labels Off'}
+                        {isGeneratingReading ? 'Generating Reading...' : '✧ Generate Palm Reading ✧'}
                       </button>
                     </div>
-                    <div style={{
-                      display: 'flex',
-                      flexWrap: 'wrap',
-                      gap: 8,
-                    }}>
-                      {vlmResult.lines.map((line, idx) => {
-                        const color = LINE_COLORS[line.name] || LINE_COLORS.default;
-                        return (
-                          <span
-                            key={idx}
-                            style={{
-                              padding: '4px 12px',
-                              background: `rgba(${color.r}, ${color.g}, ${color.b}, 0.2)`,
-                              border: `1px solid rgba(${color.r}, ${color.g}, ${color.b}, 0.4)`,
-                              borderRadius: 15,
-                              fontSize: '0.8rem',
-                              color: `rgb(${Math.min(255, color.r + 50)}, ${Math.min(255, color.g + 50)}, ${Math.min(255, color.b + 50)})`,
-                            }}
-                          >
-                            {line.name}
-                          </span>
-                        );
-                      })}
-                    </div>
-                    {vlmResult.palmQuality && (
-                      <p style={{
-                        marginTop: 10,
-                        marginBottom: 0,
-                        fontSize: '0.8rem',
-                        color: 'rgba(232, 220, 200, 0.6)',
-                      }}>
-                        Image quality: <span style={{ color: '#a0c4ff' }}>{vlmResult.palmQuality}</span>
-                      </p>
-                    )}
-                  </div>
-                )}
+                  )}
 
-                {/* Settings Panel */}
-                {showSettings && (
-                  <div style={{
-                    marginBottom: 25,
-                    padding: '20px',
-                    background: 'rgba(30, 25, 45, 0.8)',
-                    borderRadius: 12,
-                    border: '1px solid rgba(212, 175, 55, 0.2)',
-                  }}>
-                    <h4 style={{
-                      fontFamily: '"Cinzel", serif',
-                      fontSize: '0.95rem',
-                      letterSpacing: '0.08em',
-                      color: '#d4af37',
-                      marginTop: 0,
-                      marginBottom: 15,
-                    }}>
-                      AI Vision Settings
-                    </h4>
-
-                    <div style={{ marginBottom: 15 }}>
-                      <label style={{
-                        display: 'block',
-                        marginBottom: 8,
-                        fontSize: '0.85rem',
-                        color: 'rgba(232, 220, 200, 0.8)',
-                      }}>
-                        Provider
-                      </label>
-                      <select
-                        value={vlmProvider}
-                        onChange={(e) => setVlmProvider(e.target.value)}
-                        style={{
-                          width: '100%',
-                          padding: '10px 15px',
-                          background: 'rgba(20, 15, 30, 0.8)',
-                          border: '1px solid rgba(212, 175, 55, 0.3)',
-                          borderRadius: 8,
-                          color: '#e8dcc8',
-                          fontSize: '0.9rem',
-                          cursor: 'pointer',
-                        }}
-                      >
-                        <option value={VLM_PROVIDERS.OPENAI}>OpenAI (GPT-4o)</option>
-                        <option value={VLM_PROVIDERS.ANTHROPIC}>Anthropic (Claude)</option>
-                      </select>
-                    </div>
-
-                    <div style={{ marginBottom: 15 }}>
-                      <label style={{
-                        display: 'block',
-                        marginBottom: 8,
-                        fontSize: '0.85rem',
-                        color: 'rgba(232, 220, 200, 0.8)',
-                      }}>
-                        API Key
-                      </label>
-                      <input
-                        type="password"
-                        value={apiKey}
-                        onChange={(e) => setApiKey(e.target.value)}
-                        placeholder={`Enter your ${vlmProvider === VLM_PROVIDERS.OPENAI ? 'OpenAI' : 'Anthropic'} API key`}
-                        style={{
-                          width: '100%',
-                          padding: '10px 15px',
-                          background: 'rgba(20, 15, 30, 0.8)',
-                          border: '1px solid rgba(212, 175, 55, 0.3)',
-                          borderRadius: 8,
-                          color: '#e8dcc8',
-                          fontSize: '0.9rem',
-                          boxSizing: 'border-box',
-                        }}
-                      />
-                      <p style={{
-                        marginTop: 5,
-                        marginBottom: 0,
-                        fontSize: '0.75rem',
-                        color: 'rgba(232, 220, 200, 0.5)',
-                      }}>
-                        Your API key is stored locally in your browser
-                      </p>
-                    </div>
-
-                    {vlmEnabled && apiKey && (
-                      <button
-                        onClick={() => runVLMAnalysis(image)}
-                        disabled={vlmProcessing}
-                        style={{
-                          width: '100%',
-                          padding: '12px 20px',
-                          background: vlmProcessing ? 'rgba(100, 150, 255, 0.2)' : 'linear-gradient(135deg, rgba(100, 150, 255, 0.3), rgba(75, 100, 200, 0.3))',
-                          border: '1px solid rgba(100, 150, 255, 0.5)',
-                          borderRadius: 8,
-                          color: '#a0c4ff',
-                          fontFamily: '"Cinzel", serif',
-                          fontSize: '0.85rem',
-                          letterSpacing: '0.05em',
-                          cursor: vlmProcessing ? 'wait' : 'pointer',
-                          transition: 'all 0.3s ease',
-                        }}
-                      >
-                        {vlmProcessing ? 'Analyzing...' : 'Re-analyze with AI'}
-                      </button>
-                    )}
-                  </div>
-                )}
-
-                {/* Sliders */}
-                <div style={{
-                  display: 'grid',
-                  gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))',
-                  gap: 25,
-                }}>
-                  <div>
-                    <label style={{
-                      display: 'flex',
-                      justifyContent: 'space-between',
-                      marginBottom: 10,
-                      fontSize: '0.85rem',
-                      letterSpacing: '0.08em',
-                      color: 'rgba(232, 220, 200, 0.8)',
-                    }}>
-                      <span>Line Sensitivity</span>
-                      <span style={{ color: '#d4af37' }}>{sensitivity}%</span>
-                    </label>
-                    <input
-                      type="range"
-                      min="20"
-                      max="95"
-                      value={sensitivity}
-                      onChange={(e) => setSensitivity(Number(e.target.value))}
-                      className="control-slider"
-                      style={{
-                        width: '100%',
-                        height: 20,
-                        background: 'transparent',
-                        cursor: 'pointer',
-                        WebkitAppearance: 'none',
-                      }}
-                    />
-                    <div style={{
-                      display: 'flex',
-                      justifyContent: 'space-between',
-                      fontSize: '0.7rem',
-                      color: 'rgba(232, 220, 200, 0.4)',
-                      marginTop: 5,
-                    }}>
-                      <span>Major Lines</span>
-                      <span>All Lines</span>
-                    </div>
-                  </div>
-
-                  <div>
-                    <label style={{
-                      display: 'flex',
-                      justifyContent: 'space-between',
-                      marginBottom: 10,
-                      fontSize: '0.85rem',
-                      letterSpacing: '0.08em',
-                      color: 'rgba(232, 220, 200, 0.8)',
-                    }}>
-                      <span>Line Thickness</span>
-                      <span style={{ color: '#d4af37' }}>{lineThickness}px</span>
-                    </label>
-                    <input
-                      type="range"
-                      min="1"
-                      max="5"
-                      value={lineThickness}
-                      onChange={(e) => setLineThickness(Number(e.target.value))}
-                      className="control-slider"
-                      style={{
-                        width: '100%',
-                        height: 20,
-                        background: 'transparent',
-                        cursor: 'pointer',
-                        WebkitAppearance: 'none',
-                      }}
-                    />
-                    <div style={{
-                      display: 'flex',
-                      justifyContent: 'space-between',
-                      fontSize: '0.7rem',
-                      color: 'rgba(232, 220, 200, 0.4)',
-                      marginTop: 5,
-                    }}>
-                      <span>Fine</span>
-                      <span>Bold</span>
-                    </div>
-                  </div>
-
-                  {/* VLM Weight Slider - only show when VLM is enabled */}
-                  {vlmEnabled && vlmMask && (
+                  {/* Sliders */}
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 15 }}>
                     <div>
                       <label style={{
                         display: 'flex',
                         justifyContent: 'space-between',
-                        marginBottom: 10,
-                        fontSize: '0.85rem',
-                        letterSpacing: '0.08em',
-                        color: 'rgba(160, 196, 255, 0.8)',
+                        marginBottom: 8,
+                        fontSize: '0.8rem',
+                        color: 'rgba(232, 220, 200, 0.7)',
                       }}>
-                        <span>AI Guidance Strength</span>
-                        <span style={{ color: '#a0c4ff' }}>{Math.round(vlmWeight * 100)}%</span>
+                        <span>Sensitivity</span>
+                        <span style={{ color: '#d4af37' }}>{sensitivity}%</span>
                       </label>
                       <input
                         type="range"
-                        min="0"
-                        max="100"
-                        value={vlmWeight * 100}
-                        onChange={(e) => setVlmWeight(Number(e.target.value) / 100)}
+                        min="20"
+                        max="95"
+                        value={sensitivity}
+                        onChange={(e) => setSensitivity(Number(e.target.value))}
                         className="control-slider"
                         style={{
                           width: '100%',
@@ -1174,71 +1323,125 @@ export default function PalmReader() {
                           WebkitAppearance: 'none',
                         }}
                       />
-                      <div style={{
+                    </div>
+
+                    <div>
+                      <label style={{
                         display: 'flex',
                         justifyContent: 'space-between',
-                        fontSize: '0.7rem',
-                        color: 'rgba(160, 196, 255, 0.4)',
-                        marginTop: 5,
+                        marginBottom: 8,
+                        fontSize: '0.8rem',
+                        color: 'rgba(232, 220, 200, 0.7)',
                       }}>
-                        <span>Traditional</span>
-                        <span>AI Enhanced</span>
-                      </div>
+                        <span>Thickness</span>
+                        <span style={{ color: '#d4af37' }}>{lineThickness}px</span>
+                      </label>
+                      <input
+                        type="range"
+                        min="1"
+                        max="5"
+                        value={lineThickness}
+                        onChange={(e) => setLineThickness(Number(e.target.value))}
+                        className="control-slider"
+                        style={{
+                          width: '100%',
+                          height: 20,
+                          background: 'transparent',
+                          cursor: 'pointer',
+                          WebkitAppearance: 'none',
+                        }}
+                      />
                     </div>
-                  )}
+                  </div>
+
+                  {/* New Reading Button */}
+                  <button
+                    onClick={() => {
+                      setImage(null);
+                      setProcessedImage(null);
+                      setVlmResult(null);
+                      setVlmMask(null);
+                      setVlmError(null);
+                      setPalmReading(null);
+                      setShowReading(false);
+                    }}
+                    style={{
+                      width: '100%',
+                      marginTop: 15,
+                      padding: '10px',
+                      background: 'transparent',
+                      border: '1px solid rgba(150, 100, 100, 0.4)',
+                      borderRadius: 8,
+                      color: 'rgba(200, 150, 150, 0.8)',
+                      fontFamily: '"Cinzel", serif',
+                      fontSize: '0.8rem',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    New Reading
+                  </button>
                 </div>
               </div>
             </div>
 
-            {/* Info Section */}
-            <div style={{
-              marginTop: 40,
-              padding: '30px',
-              background: 'rgba(20, 15, 30, 0.5)',
-              borderRadius: 15,
-              border: '1px solid rgba(212, 175, 55, 0.15)',
-            }}>
-              <h3 style={{
-                fontFamily: '"Cinzel", serif',
-                fontSize: '1.1rem',
-                letterSpacing: '0.1em',
-                color: '#d4af37',
-                marginBottom: 20,
-                textAlign: 'center',
+            {/* Right Column - Reading */}
+            {showReading && (
+              <div className="mystical-border" style={{
+                borderRadius: 20,
+                overflow: 'hidden',
+                background: 'rgba(20, 15, 30, 0.8)',
+                backdropFilter: 'blur(10px)',
+                maxHeight: '80vh',
+                overflowY: 'auto',
               }}>
-                ✧ Reading Tips ✧
-              </h3>
+                <div style={{
+                  padding: '20px 25px',
+                  borderBottom: '1px solid rgba(212, 175, 55, 0.2)',
+                  background: 'rgba(15, 12, 25, 0.5)',
+                  position: 'sticky',
+                  top: 0,
+                  zIndex: 5,
+                }}>
+                  <div style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                  }}>
+                    <h3 style={{
+                      fontFamily: '"Cinzel", serif',
+                      fontSize: '1.1rem',
+                      letterSpacing: '0.1em',
+                      color: '#d4af37',
+                      margin: 0,
+                    }}>
+                      ✧ Your Palm Reading ✧
+                    </h3>
+                    <button
+                      onClick={() => setShowReading(false)}
+                      style={{
+                        background: 'transparent',
+                        border: 'none',
+                        color: 'rgba(232, 220, 200, 0.5)',
+                        fontSize: '1.2rem',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                </div>
 
-              <div style={{
-                display: 'grid',
-                gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
-                gap: 20,
-                fontSize: '0.9rem',
-                color: 'rgba(232, 220, 200, 0.7)',
-                lineHeight: 1.7,
-              }}>
-                <div>
-                  <strong style={{ color: '#d4af37' }}>Sensitivity:</strong> Increase to reveal finer, more subtle lines. Decrease to focus only on the major palm lines.
-                </div>
-                <div>
-                  <strong style={{ color: '#d4af37' }}>Thickness:</strong> Adjust to make detected lines more visible for easier reading.
-                </div>
-                <div>
-                  <strong style={{ color: '#d4af37' }}>Best Results:</strong> Use a clear, high-contrast photo with good lighting and minimal shadows.
-                </div>
-                <div>
-                  <strong style={{ color: '#a0c4ff' }}>AI Vision:</strong> Enable AI Vision mode for intelligent line detection. The AI identifies major palm lines (Heart, Head, Life, Fate) and enhances edge detection accuracy.
-                </div>
+                <ReadingSection reading={palmReading} isGenerating={isGeneratingReading} />
               </div>
-            </div>
-          </>
+            )}
+          </div>
         )}
 
         {/* Footer */}
         <footer style={{
-          marginTop: 50,
+          marginTop: 40,
           textAlign: 'center',
-          fontSize: '0.8rem',
+          fontSize: '0.75rem',
           color: 'rgba(232, 220, 200, 0.4)',
           letterSpacing: '0.05em',
         }}>
