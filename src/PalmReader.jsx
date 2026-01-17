@@ -304,7 +304,7 @@ const morphologicalClose = (binary, width, height, radius) => {
   return result;
 };
 
-// Palm line detection using Gabor filters + CLAHE + multi-scale analysis
+// Palm line detection - focused on major creases only with clean output
 const detectPalmLines = (imageData, sensitivity = 50, lineThickness = 2, vlmMask = null, vlmWeight = 0.5) => {
   const { data, width, height } = imageData;
   const output = new Uint8ClampedArray(data.length);
@@ -318,93 +318,144 @@ const detectPalmLines = (imageData, sensitivity = 50, lineThickness = 2, vlmMask
     gray[i / 4] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
   }
 
-  // Apply CLAHE for contrast normalization
-  const enhanced = applyCLAHE(gray, width, height, 48, 2.5);
+  // Strong Gaussian blur to completely eliminate skin texture
+  const applyStrongBlur = (input, passes) => {
+    const kernel = [1, 4, 6, 4, 1];
+    const kernelSum = 16;
+    let current = input;
 
-  // Apply Gaussian blur to reduce noise
-  const kernel = [1, 4, 6, 4, 1];
-  const kernelSum = 16;
-  const blurred = new Float32Array(width * height);
+    for (let pass = 0; pass < passes; pass++) {
+      const temp = new Float32Array(width * height);
+      const result = new Float32Array(width * height);
 
-  // Horizontal pass
-  const temp = new Float32Array(width * height);
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      let sum = 0;
-      for (let k = -2; k <= 2; k++) {
-        const px = Math.min(Math.max(x + k, 0), width - 1);
-        sum += enhanced[y * width + px] * kernel[k + 2];
+      // Horizontal pass
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          let sum = 0;
+          for (let k = -2; k <= 2; k++) {
+            const px = Math.min(Math.max(x + k, 0), width - 1);
+            sum += current[y * width + px] * kernel[k + 2];
+          }
+          temp[y * width + x] = sum / kernelSum;
+        }
       }
-      temp[y * width + x] = sum / kernelSum;
-    }
-  }
 
-  // Vertical pass
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      let sum = 0;
-      for (let k = -2; k <= 2; k++) {
-        const py = Math.min(Math.max(y + k, 0), height - 1);
-        sum += temp[py * width + x] * kernel[k + 2];
+      // Vertical pass
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          let sum = 0;
+          for (let k = -2; k <= 2; k++) {
+            const py = Math.min(Math.max(y + k, 0), height - 1);
+            sum += temp[py * width + x] * kernel[k + 2];
+          }
+          result[y * width + x] = sum / kernelSum;
+        }
       }
-      blurred[y * width + x] = sum / kernelSum;
+
+      current = result;
     }
-  }
 
-  // Multi-scale line detection with Gabor filters
-  const lineResponse = multiScaleLineDetection(blurred, width, height, interiorMask);
+    return current;
+  };
 
-  // Calculate adaptive threshold
-  let maxResponse = 0;
-  let sumResponse = 0;
-  let countResponse = 0;
+  // Apply very strong blur (5 passes) to eliminate skin texture
+  const blurred = applyStrongBlur(gray, 5);
 
-  for (let i = 0; i < lineResponse.length; i++) {
-    if (lineResponse[i] > 0 && interiorMask[i] === 255) {
-      maxResponse = Math.max(maxResponse, lineResponse[i]);
-      sumResponse += lineResponse[i];
-      countResponse++;
-    }
-  }
+  // Detect only the deepest valleys (major creases)
+  // Use larger sample distance for major lines only
+  const creaseMap = new Float32Array(width * height);
+  const sampleDist = 6; // Larger distance = only detect major creases
 
-  const avgResponse = countResponse > 0 ? sumResponse / countResponse : 0;
-  const sensitivityFactor = sensitivity / 100;
-
-  // Threshold: lower sensitivity = higher threshold = fewer lines
-  const baseThreshold = avgResponse + (maxResponse - avgResponse) * 0.3;
-  const threshold = baseThreshold * (1.5 - sensitivityFactor);
-
-  // Apply threshold
-  const binary = new Uint8Array(width * height);
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
+  for (let y = sampleDist; y < height - sampleDist; y++) {
+    for (let x = sampleDist; x < width - sampleDist; x++) {
       const idx = y * width + x;
       if (interiorMask[idx] === 0) continue;
 
-      let effectiveThreshold = threshold;
-      if (vlmMask && vlmMask[idx] > 0) {
-        effectiveThreshold = threshold * (1 - vlmWeight * 0.3);
+      const center = blurred[idx];
+
+      // Check multiple directions for valley detection
+      const directions = [
+        [[0, -sampleDist], [0, sampleDist]],   // vertical
+        [[-sampleDist, 0], [sampleDist, 0]],   // horizontal
+        [[-sampleDist, -sampleDist], [sampleDist, sampleDist]], // diagonal 1
+        [[-sampleDist, sampleDist], [sampleDist, -sampleDist]], // diagonal 2
+      ];
+
+      let maxValleyScore = 0;
+
+      for (const [[dx1, dy1], [dx2, dy2]] of directions) {
+        const side1 = blurred[(y + dy1) * width + (x + dx1)];
+        const side2 = blurred[(y + dy2) * width + (x + dx2)];
+
+        // Valley = center darker than both sides
+        const minSide = Math.min(side1, side2);
+        if (center < minSide - 3) { // Require significant darkness difference
+          const valleyScore = minSide - center;
+          maxValleyScore = Math.max(maxValleyScore, valleyScore);
+        }
       }
 
-      if (lineResponse[idx] > effectiveThreshold) {
-        binary[idx] = 255;
+      creaseMap[idx] = maxValleyScore;
+    }
+  }
+
+  // Calculate percentile-based threshold (only top responses)
+  const responses = [];
+  for (let i = 0; i < creaseMap.length; i++) {
+    if (creaseMap[i] > 0 && interiorMask[i] === 255) {
+      responses.push(creaseMap[i]);
+    }
+  }
+
+  responses.sort((a, b) => b - a);
+
+  // Use top percentile based on sensitivity (higher sensitivity = more lines)
+  const sensitivityFactor = sensitivity / 100;
+  const percentileIndex = Math.floor(responses.length * (0.02 + sensitivityFactor * 0.08)); // Top 2-10%
+  const threshold = responses[Math.min(percentileIndex, responses.length - 1)] || 0;
+
+  // Apply threshold
+  const binary = new Uint8Array(width * height);
+  for (let i = 0; i < creaseMap.length; i++) {
+    if (interiorMask[i] === 255 && creaseMap[i] >= threshold) {
+      binary[i] = 255;
+    }
+  }
+
+  // Non-maximum suppression to thin lines
+  const thinned = new Uint8Array(width * height);
+  for (let y = 1; y < height - 1; y++) {
+    for (let x = 1; x < width - 1; x++) {
+      const idx = y * width + x;
+      if (binary[idx] === 0) continue;
+
+      const val = creaseMap[idx];
+
+      // Check if this is a local maximum in at least one direction
+      const isMaxH = val >= creaseMap[y * width + (x - 1)] && val >= creaseMap[y * width + (x + 1)];
+      const isMaxV = val >= creaseMap[(y - 1) * width + x] && val >= creaseMap[(y + 1) * width + x];
+      const isMaxD1 = val >= creaseMap[(y - 1) * width + (x - 1)] && val >= creaseMap[(y + 1) * width + (x + 1)];
+      const isMaxD2 = val >= creaseMap[(y - 1) * width + (x + 1)] && val >= creaseMap[(y + 1) * width + (x - 1)];
+
+      if (isMaxH || isMaxV || isMaxD1 || isMaxD2) {
+        thinned[idx] = 255;
       }
     }
   }
 
-  // Morphological closing to connect broken segments
-  const closed = morphologicalClose(binary, width, height, Math.max(1, lineThickness - 1));
+  // Connect nearby line segments with morphological closing
+  const connected = morphologicalClose(thinned, width, height, 2);
 
-  // Apply final dilation for visibility
-  const dilateRadius = Math.max(1, Math.floor(lineThickness / 2));
+  // Apply controlled dilation for visibility
+  const dilateRadius = Math.max(1, lineThickness);
   const final = new Uint8Array(width * height);
 
   for (let y = dilateRadius; y < height - dilateRadius; y++) {
     for (let x = dilateRadius; x < width - dilateRadius; x++) {
-      if (closed[y * width + x] === 255) {
+      if (connected[y * width + x] === 255) {
         for (let dy = -dilateRadius; dy <= dilateRadius; dy++) {
           for (let dx = -dilateRadius; dx <= dilateRadius; dx++) {
-            if (dx * dx + dy * dy <= dilateRadius * dilateRadius + 1) {
+            if (dx * dx + dy * dy <= dilateRadius * dilateRadius) {
               final[(y + dy) * width + (x + dx)] = 255;
             }
           }
