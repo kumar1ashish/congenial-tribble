@@ -1047,6 +1047,11 @@ export default function PalmReader() {
   const fileInputRef = useRef(null);
   const displayedImageRef = useRef(null);
 
+  // Python API configuration
+  const PYTHON_API_URL = 'http://localhost:5001';
+  const [usePythonAPI, setUsePythonAPI] = useState(true); // Default to Python API
+  const [pythonAPIError, setPythonAPIError] = useState(null);
+
   // VLM-related state
   const [vlmEnabled, setVlmEnabled] = useState(false);
   const [apiKey, setApiKey] = useState(() => localStorage.getItem('anthropic_api_key') || '');
@@ -1092,11 +1097,12 @@ export default function PalmReader() {
     return () => window.removeEventListener('resize', updateDisplayedDimensions);
   }, [updateDisplayedDimensions]);
 
-  const processImage = useCallback((imgSrc, sens = sensitivity, thickness = lineThickness, currentVlmMask = vlmMask, currentVlmWeight = vlmWeight) => {
+  const processImage = useCallback(async (imgSrc, sens = sensitivity, thickness = lineThickness, currentVlmMask = vlmMask, currentVlmWeight = vlmWeight) => {
     setIsProcessing(true);
+    setPythonAPIError(null);
 
     const img = new Image();
-    img.onload = () => {
+    img.onload = async () => {
       const canvas = canvasRef.current;
       const ctx = canvas.getContext('2d');
 
@@ -1114,6 +1120,68 @@ export default function PalmReader() {
       canvas.height = height;
       ctx.drawImage(img, 0, 0, width, height);
 
+      // Try Python API first if enabled
+      if (usePythonAPI) {
+        try {
+          const base64Image = canvas.toDataURL('image/png');
+          const response = await fetch(`${PYTHON_API_URL}/detect`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              image: base64Image,
+              line_thickness: thickness,
+              return_intermediate: false
+            }),
+          });
+
+          if (response.ok) {
+            const result = await response.json();
+            if (result.success && result.skeleton_mask) {
+              // Create overlay from skeleton mask
+              const skeletonImg = new Image();
+              skeletonImg.onload = () => {
+                const tempCanvas = document.createElement('canvas');
+                tempCanvas.width = width;
+                tempCanvas.height = height;
+                const tempCtx = tempCanvas.getContext('2d');
+
+                // Draw skeleton mask
+                tempCtx.drawImage(skeletonImg, 0, 0, width, height);
+
+                // Get image data and colorize it golden
+                const imgData = tempCtx.getImageData(0, 0, width, height);
+                const data = imgData.data;
+                for (let i = 0; i < data.length; i += 4) {
+                  if (data[i] > 127) { // White pixels in mask
+                    data[i] = 255;     // R
+                    data[i + 1] = 200; // G
+                    data[i + 2] = 100; // B
+                    data[i + 3] = 255; // A
+                  } else {
+                    data[i + 3] = 0;   // Transparent
+                  }
+                }
+                tempCtx.putImageData(imgData, 0, 0);
+
+                setProcessedImage(tempCanvas.toDataURL());
+                setIsProcessing(false);
+              };
+              skeletonImg.src = `data:image/png;base64,${result.skeleton_mask}`;
+              return;
+            }
+          }
+          // If we get here, API call failed - fall through to JS fallback
+          console.warn('Python API returned error, falling back to JS detection');
+          setPythonAPIError('Python API unavailable, using JavaScript fallback');
+        } catch (err) {
+          console.warn('Python API error:', err.message);
+          setPythonAPIError(`Python API error: ${err.message}. Using JavaScript fallback.`);
+        }
+      }
+
+      // Fallback to JavaScript detection
       const imageData = ctx.getImageData(0, 0, width, height);
       const maskToUse = vlmEnabled && currentVlmMask ? currentVlmMask : null;
       const processed = detectPalmLines(imageData, sens, thickness, maskToUse, currentVlmWeight);
@@ -1128,7 +1196,7 @@ export default function PalmReader() {
       setIsProcessing(false);
     };
     img.src = imgSrc;
-  }, [sensitivity, lineThickness, vlmMask, vlmWeight, vlmEnabled]);
+  }, [sensitivity, lineThickness, vlmMask, vlmWeight, vlmEnabled, usePythonAPI, PYTHON_API_URL]);
 
   const runVLMAnalysis = useCallback(async (imgSrc) => {
     if (!apiKey) {
@@ -1757,6 +1825,73 @@ export default function PalmReader() {
                       borderRadius: 10,
                       border: '1px solid rgba(212, 175, 55, 0.2)',
                     }}>
+                      {/* Python API Settings */}
+                      <h4 style={{
+                        fontFamily: '"Cinzel", serif',
+                        fontSize: '0.9rem',
+                        color: '#d4af37',
+                        marginTop: 0,
+                        marginBottom: 12,
+                      }}>
+                        Detection Backend
+                      </h4>
+
+                      <div style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 10,
+                        marginBottom: 12,
+                        padding: '8px 12px',
+                        background: usePythonAPI ? 'rgba(100, 200, 100, 0.1)' : 'rgba(200, 150, 100, 0.1)',
+                        borderRadius: 6,
+                        border: `1px solid ${usePythonAPI ? 'rgba(100, 200, 100, 0.3)' : 'rgba(200, 150, 100, 0.3)'}`,
+                      }}>
+                        <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+                          <input
+                            type="checkbox"
+                            checked={usePythonAPI}
+                            onChange={(e) => setUsePythonAPI(e.target.checked)}
+                            style={{ cursor: 'pointer' }}
+                          />
+                          <span style={{ fontSize: '0.85rem', color: '#e8dcc8' }}>
+                            Use Python API (Neuro-Symbolic)
+                          </span>
+                        </label>
+                        <span style={{
+                          fontSize: '0.7rem',
+                          color: usePythonAPI ? '#90EE90' : '#FFB347',
+                          marginLeft: 'auto',
+                        }}>
+                          {usePythonAPI ? '● Frangi + SAM' : '○ JavaScript'}
+                        </span>
+                      </div>
+
+                      {pythonAPIError && (
+                        <div style={{
+                          padding: '8px 12px',
+                          marginBottom: 12,
+                          background: 'rgba(255, 165, 0, 0.1)',
+                          border: '1px solid rgba(255, 165, 0, 0.3)',
+                          borderRadius: 6,
+                          fontSize: '0.75rem',
+                          color: '#FFB347',
+                        }}>
+                          ⚠ {pythonAPIError}
+                        </div>
+                      )}
+
+                      <div style={{
+                        fontSize: '0.7rem',
+                        color: 'rgba(232, 220, 200, 0.5)',
+                        marginBottom: 15,
+                        paddingBottom: 15,
+                        borderBottom: '1px solid rgba(212, 175, 55, 0.1)',
+                      }}>
+                        {usePythonAPI
+                          ? 'Requires: python api_server.py (port 5001)'
+                          : 'Using browser-based detection'}
+                      </div>
+
                       <h4 style={{
                         fontFamily: '"Cinzel", serif',
                         fontSize: '0.9rem',
