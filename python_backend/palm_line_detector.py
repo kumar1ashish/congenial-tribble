@@ -129,9 +129,8 @@ class FrangiRidgeDetector:
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         enhanced = clahe.apply(gray)
 
-        # Strong Gaussian blur to eliminate skin texture, keep only major creases
-        blurred = cv2.GaussianBlur(enhanced, (9, 9), 2.0)
-        blurred = cv2.GaussianBlur(blurred, (9, 9), 2.0)  # Double blur
+        # Moderate Gaussian blur to reduce texture but preserve line structure
+        blurred = cv2.GaussianBlur(enhanced, (7, 7), 1.5)
 
         # Convert to float [0, 1]
         return img_as_float(blurred)
@@ -443,24 +442,28 @@ class SAMSegmenter:
         # This gives better results for the fallback
         mask = np.zeros((h, w), dtype=np.uint8)
 
-        # Get only the strongest responses (top 1-2%)
+        # Get the strongest responses (top 3-5%) to preserve line thickness
         valid_responses = frangi_masked[frangi_masked > 0]
         if len(valid_responses) > 0:
-            threshold = np.percentile(valid_responses, 98.5)  # Only top 1.5%
+            threshold = np.percentile(valid_responses, 96)  # Top 4% for fuller lines
 
             # Apply threshold
             binary = (frangi_masked > threshold).astype(np.uint8) * 255
 
             # Remove small noise fragments with area filtering
             num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
-            min_area = 50  # Minimum pixels for a valid line segment
+            min_area = 100  # Minimum pixels for a valid line segment
             for i in range(1, num_labels):
                 if stats[i, cv2.CC_STAT_AREA] < min_area:
                     binary[labels == i] = 0
 
-            # Close small gaps in lines
-            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-            binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+            # Close gaps to connect line segments
+            kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+            binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel_close)
+
+            # Dilate to make lines thicker and more visible
+            kernel_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+            binary = cv2.dilate(binary, kernel_dilate, iterations=1)
 
             mask = binary
 
@@ -673,8 +676,23 @@ class PalmLineDetectionPipeline:
                 frangi_response
             )
 
-        print("Phase 4: Applying Zhang-Suen skeletonization...")
-        skeletons, combined_skeleton = self.skeletonizer.skeletonize_all(segmentation_masks)
+        # Skip skeletonization to preserve natural line thickness
+        # Just combine the segmentation masks directly
+        print("Phase 4: Combining line masks (preserving natural thickness)...")
+
+        combined_mask = None
+        for name, mask in segmentation_masks.items():
+            if combined_mask is None:
+                combined_mask = mask.copy()
+            else:
+                combined_mask = cv2.bitwise_or(combined_mask, mask)
+
+        if combined_mask is None:
+            combined_mask = np.zeros(image_rgb.shape[:2], dtype=np.uint8)
+
+        # Use segmentation masks as "skeletons" (they have natural thickness)
+        skeletons = segmentation_masks
+        combined_skeleton = combined_mask
 
         print("Pipeline complete!")
 
