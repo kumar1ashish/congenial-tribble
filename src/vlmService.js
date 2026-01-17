@@ -1,10 +1,5 @@
 // Vision Language Model Service for Palm Line Detection and Reading
-// Supports multiple VLM providers for enhanced palm line analysis
-
-const VLM_PROVIDERS = {
-  OPENAI: 'openai',
-  ANTHROPIC: 'anthropic',
-};
+// Uses Anthropic Claude for palm analysis
 
 // Enhanced prompt for detailed palm line detection with control points
 const PALM_ANALYSIS_PROMPT = `You are an expert palmistry analyst. Analyze this palm image carefully and identify ALL visible palm lines with precise coordinates.
@@ -103,80 +98,6 @@ Respond in JSON format:
 const extractBase64FromDataUrl = (dataUrl) => {
   const base64Match = dataUrl.match(/^data:image\/\w+;base64,(.+)$/);
   return base64Match ? base64Match[1] : null;
-};
-
-// OpenAI GPT-4 Vision API call
-const analyzeWithOpenAI = async (imageDataUrl, apiKey, prompt) => {
-  const response = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model: 'gpt-4o',
-      messages: [
-        {
-          role: 'user',
-          content: [
-            {
-              type: 'text',
-              text: prompt,
-            },
-            {
-              type: 'image_url',
-              image_url: {
-                url: imageDataUrl,
-                detail: 'high',
-              },
-            },
-          ],
-        },
-      ],
-      max_tokens: 3000,
-      temperature: 0.7,
-    }),
-  });
-
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({}));
-    throw new Error(error.error?.message || `OpenAI API error: ${response.status}`);
-  }
-
-  const data = await response.json();
-  return data.choices?.[0]?.message?.content;
-};
-
-// OpenAI text completion for palm reading
-const generateReadingWithOpenAI = async (analysisData, apiKey) => {
-  const prompt = PALM_READING_PROMPT.replace('{ANALYSIS_DATA}', JSON.stringify(analysisData, null, 2));
-
-  const response = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model: 'gpt-4o',
-      messages: [
-        {
-          role: 'user',
-          content: prompt,
-        },
-      ],
-      max_tokens: 2500,
-      temperature: 0.8,
-    }),
-  });
-
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({}));
-    throw new Error(error.error?.message || `OpenAI API error: ${response.status}`);
-  }
-
-  const data = await response.json();
-  return data.choices?.[0]?.message?.content;
 };
 
 // Anthropic Claude Vision API call
@@ -331,44 +252,22 @@ const parseReadingResponse = (content) => {
 };
 
 // Main analysis function
-export const analyzeWithVLM = async (imageDataUrl, provider, apiKey) => {
+export const analyzeWithVLM = async (imageDataUrl, apiKey) => {
   if (!apiKey) {
     throw new Error('API key is required');
   }
 
-  let content;
-  switch (provider) {
-    case VLM_PROVIDERS.OPENAI:
-      content = await analyzeWithOpenAI(imageDataUrl, apiKey, PALM_ANALYSIS_PROMPT);
-      break;
-    case VLM_PROVIDERS.ANTHROPIC:
-      content = await analyzeWithAnthropic(imageDataUrl, apiKey, PALM_ANALYSIS_PROMPT);
-      break;
-    default:
-      throw new Error(`Unknown VLM provider: ${provider}`);
-  }
-
+  const content = await analyzeWithAnthropic(imageDataUrl, apiKey, PALM_ANALYSIS_PROMPT);
   return parseVLMResponse(content);
 };
 
 // Generate palm reading
-export const generatePalmReading = async (analysisData, provider, apiKey) => {
+export const generatePalmReading = async (analysisData, apiKey) => {
   if (!apiKey) {
     throw new Error('API key is required');
   }
 
-  let content;
-  switch (provider) {
-    case VLM_PROVIDERS.OPENAI:
-      content = await generateReadingWithOpenAI(analysisData, apiKey);
-      break;
-    case VLM_PROVIDERS.ANTHROPIC:
-      content = await generateReadingWithAnthropic(analysisData, apiKey);
-      break;
-    default:
-      throw new Error(`Unknown provider: ${provider}`);
-  }
-
+  const content = await generateReadingWithAnthropic(analysisData, apiKey);
   return parseReadingResponse(content);
 };
 
@@ -475,5 +374,3 @@ export const getLineColor = (lineName) => {
 
   return LINE_COLORS.default;
 };
-
-export { VLM_PROVIDERS };

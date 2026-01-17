@@ -5,7 +5,6 @@ import {
   generatePalmReading,
   LINE_COLORS,
   getLineColor,
-  VLM_PROVIDERS,
 } from './vlmService';
 
 // Skin detection using YCbCr color space - works well for various skin tones
@@ -766,8 +765,7 @@ export default function PalmReader() {
 
   // VLM-related state
   const [vlmEnabled, setVlmEnabled] = useState(false);
-  const [vlmProvider, setVlmProvider] = useState(VLM_PROVIDERS.OPENAI);
-  const [apiKey, setApiKey] = useState(() => localStorage.getItem('vlm_api_key') || '');
+  const [apiKey, setApiKey] = useState(() => localStorage.getItem('anthropic_api_key') || '');
   const [vlmResult, setVlmResult] = useState(null);
   const [vlmMask, setVlmMask] = useState(null);
   const [vlmWeight, setVlmWeight] = useState(0.6);
@@ -790,7 +788,7 @@ export default function PalmReader() {
 
   useEffect(() => {
     if (apiKey) {
-      localStorage.setItem('vlm_api_key', apiKey);
+      localStorage.setItem('anthropic_api_key', apiKey);
     }
   }, [apiKey]);
 
@@ -859,7 +857,7 @@ export default function PalmReader() {
     setVlmError(null);
 
     try {
-      const result = await analyzeWithVLM(imgSrc, vlmProvider, apiKey);
+      const result = await analyzeWithVLM(imgSrc, apiKey);
       setVlmResult(result);
 
       if (result.lines && result.lines.length > 0) {
@@ -886,7 +884,7 @@ export default function PalmReader() {
       setVlmError(err.message);
       setVlmProcessing(false);
     }
-  }, [apiKey, vlmProvider, sensitivity, lineThickness, vlmWeight, processImage]);
+  }, [apiKey, sensitivity, lineThickness, vlmWeight, processImage]);
 
   const generateReading = useCallback(async () => {
     if (!vlmResult || !apiKey) {
@@ -898,7 +896,7 @@ export default function PalmReader() {
     setShowReading(true);
 
     try {
-      const reading = await generatePalmReading(vlmResult, vlmProvider, apiKey);
+      const reading = await generatePalmReading(vlmResult, apiKey);
       setPalmReading(reading);
     } catch (err) {
       console.error('Reading generation error:', err);
@@ -906,7 +904,7 @@ export default function PalmReader() {
     }
 
     setIsGeneratingReading(false);
-  }, [vlmResult, vlmProvider, apiKey]);
+  }, [vlmResult, apiKey]);
 
   // File validation function
   const validateFile = useCallback((file) => {
@@ -1482,40 +1480,18 @@ export default function PalmReader() {
                         marginTop: 0,
                         marginBottom: 12,
                       }}>
-                        AI Settings
+                        AI Settings (Anthropic Claude)
                       </h4>
 
                       <div style={{ marginBottom: 12 }}>
                         <label style={{ display: 'block', marginBottom: 5, fontSize: '0.8rem', color: 'rgba(232, 220, 200, 0.7)' }}>
-                          Provider
-                        </label>
-                        <select
-                          value={vlmProvider}
-                          onChange={(e) => setVlmProvider(e.target.value)}
-                          style={{
-                            width: '100%',
-                            padding: '8px 12px',
-                            background: 'rgba(20, 15, 30, 0.8)',
-                            border: '1px solid rgba(212, 175, 55, 0.3)',
-                            borderRadius: 6,
-                            color: '#e8dcc8',
-                            fontSize: '0.85rem',
-                          }}
-                        >
-                          <option value={VLM_PROVIDERS.OPENAI}>OpenAI (GPT-4o)</option>
-                          <option value={VLM_PROVIDERS.ANTHROPIC}>Anthropic (Claude)</option>
-                        </select>
-                      </div>
-
-                      <div style={{ marginBottom: 12 }}>
-                        <label style={{ display: 'block', marginBottom: 5, fontSize: '0.8rem', color: 'rgba(232, 220, 200, 0.7)' }}>
-                          API Key
+                          Anthropic API Key
                         </label>
                         <input
                           type="password"
                           value={apiKey}
                           onChange={(e) => setApiKey(e.target.value)}
-                          placeholder="Enter API key"
+                          placeholder="Enter Anthropic API key"
                           style={{
                             width: '100%',
                             padding: '8px 12px',
