@@ -8,7 +8,7 @@ import {
   VLM_PROVIDERS,
 } from './vlmService';
 
-// Palm line detection using edge detection and line enhancement
+// Palm line detection using edge detection optimized for palm creases
 const detectPalmLines = (imageData, sensitivity = 50, lineThickness = 2, vlmMask = null, vlmWeight = 0.5) => {
   const { data, width, height } = imageData;
   const gray = new Float32Array(width * height);
@@ -20,45 +20,87 @@ const detectPalmLines = (imageData, sensitivity = 50, lineThickness = 2, vlmMask
     gray[idx] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
   }
 
-  // Apply contrast enhancement as per specification
-  // Enhanced = clamp(((Original - 128) × ContrastFactor) + 128, 0, 255)
-  // ContrastFactor 1.3 works well for palm images
-  const contrastFactor = 1.3;
+  // Apply contrast enhancement - slightly reduced to avoid enhancing skin texture
+  const contrastFactor = 1.2;
   for (let i = 0; i < gray.length; i++) {
     gray[i] = Math.max(0, Math.min(255, ((gray[i] - 128) * contrastFactor) + 128));
   }
 
-  // Apply Gaussian blur to reduce noise
-  const blurred = new Float32Array(width * height);
+  // Apply stronger Gaussian blur to eliminate skin texture (7x7 kernel approximation via two passes)
   const kernel = [1, 4, 6, 4, 1];
   const kernelSum = 16;
 
-  // Horizontal pass
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      let sum = 0;
-      for (let k = -2; k <= 2; k++) {
-        const px = Math.min(Math.max(x + k, 0), width - 1);
-        sum += gray[y * width + px] * kernel[k + 2];
+  // Helper function for separable Gaussian blur
+  const applyGaussianBlur = (input) => {
+    const temp = new Float32Array(width * height);
+    const result = new Float32Array(width * height);
+
+    // Horizontal pass
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        let sum = 0;
+        for (let k = -2; k <= 2; k++) {
+          const px = Math.min(Math.max(x + k, 0), width - 1);
+          sum += input[y * width + px] * kernel[k + 2];
+        }
+        temp[y * width + x] = sum / kernelSum;
       }
-      blurred[y * width + x] = sum / kernelSum;
+    }
+
+    // Vertical pass
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        let sum = 0;
+        for (let k = -2; k <= 2; k++) {
+          const py = Math.min(Math.max(y + k, 0), height - 1);
+          sum += temp[py * width + x] * kernel[k + 2];
+        }
+        result[y * width + x] = sum / kernelSum;
+      }
+    }
+
+    return result;
+  };
+
+  // Apply blur twice for stronger smoothing (approximates larger kernel)
+  let blurred = applyGaussianBlur(gray);
+  blurred = applyGaussianBlur(blurred);
+
+  // Detect valleys (dark lines) using second derivative / Laplacian-like approach
+  // Palm lines are dark grooves, so we look for local minima in brightness
+  const valleys = new Float32Array(width * height);
+
+  for (let y = 2; y < height - 2; y++) {
+    for (let x = 2; x < width - 2; x++) {
+      const idx = y * width + x;
+      const center = blurred[idx];
+
+      // Check if this pixel is darker than its surroundings (valley detection)
+      // Sample in multiple directions
+      const neighbors = [
+        blurred[(y - 2) * width + x],     // up
+        blurred[(y + 2) * width + x],     // down
+        blurred[y * width + (x - 2)],     // left
+        blurred[y * width + (x + 2)],     // right
+        blurred[(y - 2) * width + (x - 2)], // diagonal
+        blurred[(y - 2) * width + (x + 2)],
+        blurred[(y + 2) * width + (x - 2)],
+        blurred[(y + 2) * width + (x + 2)],
+      ];
+
+      // Calculate how much darker the center is compared to neighbors
+      let valleyScore = 0;
+      for (const neighbor of neighbors) {
+        if (neighbor > center) {
+          valleyScore += neighbor - center;
+        }
+      }
+
+      valleys[idx] = valleyScore;
     }
   }
 
-  // Vertical pass
-  const blurred2 = new Float32Array(width * height);
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      let sum = 0;
-      for (let k = -2; k <= 2; k++) {
-        const py = Math.min(Math.max(y + k, 0), height - 1);
-        sum += blurred[py * width + x] * kernel[k + 2];
-      }
-      blurred2[y * width + x] = sum / kernelSum;
-    }
-  }
-
-  // Sobel edge detection
+  // Sobel edge detection on the blurred image
   const edges = new Float32Array(width * height);
   const directions = new Float32Array(width * height);
 
@@ -67,13 +109,13 @@ const detectPalmLines = (imageData, sensitivity = 50, lineThickness = 2, vlmMask
       const idx = y * width + x;
 
       const gx = (
-        -blurred2[(y - 1) * width + (x - 1)] - 2 * blurred2[y * width + (x - 1)] - blurred2[(y + 1) * width + (x - 1)] +
-        blurred2[(y - 1) * width + (x + 1)] + 2 * blurred2[y * width + (x + 1)] + blurred2[(y + 1) * width + (x + 1)]
+        -blurred[(y - 1) * width + (x - 1)] - 2 * blurred[y * width + (x - 1)] - blurred[(y + 1) * width + (x - 1)] +
+        blurred[(y - 1) * width + (x + 1)] + 2 * blurred[y * width + (x + 1)] + blurred[(y + 1) * width + (x + 1)]
       );
 
       const gy = (
-        -blurred2[(y - 1) * width + (x - 1)] - 2 * blurred2[(y - 1) * width + x] - blurred2[(y - 1) * width + (x + 1)] +
-        blurred2[(y + 1) * width + (x - 1)] + 2 * blurred2[(y + 1) * width + x] + blurred2[(y + 1) * width + (x + 1)]
+        -blurred[(y - 1) * width + (x - 1)] - 2 * blurred[(y - 1) * width + x] - blurred[(y - 1) * width + (x + 1)] +
+        blurred[(y + 1) * width + (x - 1)] + 2 * blurred[(y + 1) * width + x] + blurred[(y + 1) * width + (x + 1)]
       );
 
       edges[idx] = Math.sqrt(gx * gx + gy * gy);
@@ -81,7 +123,7 @@ const detectPalmLines = (imageData, sensitivity = 50, lineThickness = 2, vlmMask
     }
   }
 
-  // Non-maximum suppression
+  // Non-maximum suppression for thin edges
   const suppressed = new Float32Array(width * height);
 
   for (let y = 2; y < height - 2; y++) {
@@ -115,21 +157,31 @@ const detectPalmLines = (imageData, sensitivity = 50, lineThickness = 2, vlmMask
       }
 
       if (mag >= neighbor1 && mag >= neighbor2) {
-        suppressed[idx] = mag;
+        // Combine edge magnitude with valley score to prioritize palm creases
+        const valleyBoost = valleys[idx] > 0 ? 1 + (valleys[idx] / 100) : 0.3;
+        suppressed[idx] = mag * valleyBoost;
       }
     }
   }
 
+  // Find max edge value for threshold calculation
   let maxEdge = 0;
   for (let i = 0; i < suppressed.length; i++) {
     if (suppressed[i] > maxEdge) maxEdge = suppressed[i];
   }
 
-  const threshold = maxEdge * (1 - sensitivity / 100) * 0.15;
-  const lowThreshold = threshold * 0.4;
+  // Higher base threshold to only detect strong palm lines
+  // Sensitivity maps 20-95 to threshold range
+  const sensitivityFactor = (sensitivity - 20) / 75; // 0 to 1
+  const baseThreshold = 0.25; // Higher base = fewer edges
+  const minThreshold = 0.08;
+  const thresholdMultiplier = baseThreshold - (sensitivityFactor * (baseThreshold - minThreshold));
+  const threshold = maxEdge * thresholdMultiplier;
+  const lowThreshold = threshold * 0.5;
 
   const result = new Uint8Array(width * height);
 
+  // Hysteresis thresholding
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       const idx = y * width + x;
@@ -137,8 +189,9 @@ const detectPalmLines = (imageData, sensitivity = 50, lineThickness = 2, vlmMask
       let effectiveThreshold = threshold;
       let effectiveLowThreshold = lowThreshold;
 
+      // VLM mask lowers threshold in detected palm line regions
       if (vlmMask && vlmMask[idx] > 0) {
-        const vlmFactor = 1 - (vlmWeight * 0.7);
+        const vlmFactor = 1 - (vlmWeight * 0.5);
         effectiveThreshold = threshold * vlmFactor;
         effectiveLowThreshold = lowThreshold * vlmFactor;
       }
@@ -146,6 +199,7 @@ const detectPalmLines = (imageData, sensitivity = 50, lineThickness = 2, vlmMask
       if (suppressed[idx] > effectiveThreshold) {
         result[idx] = 255;
       } else if (suppressed[idx] > effectiveLowThreshold) {
+        // Check if connected to strong edge
         let connected = false;
         for (let dy = -1; dy <= 1 && !connected; dy++) {
           for (let dx = -1; dx <= 1 && !connected; dx++) {
@@ -159,24 +213,26 @@ const detectPalmLines = (imageData, sensitivity = 50, lineThickness = 2, vlmMask
           }
         }
         if (connected) result[idx] = 255;
-
-        if (!connected && vlmMask && vlmMask[idx] > 0 && suppressed[idx] > lowThreshold * 0.3) {
-          result[idx] = 255;
-        }
       }
     }
   }
 
+  // Apply dilation based on line thickness setting
   const dilated = new Uint8Array(width * height);
-  const dilateRadius = Math.max(1, Math.floor(lineThickness / 2));
+  const dilateRadius = Math.max(0, Math.floor((lineThickness - 1) / 2));
 
-  for (let y = dilateRadius; y < height - dilateRadius; y++) {
-    for (let x = dilateRadius; x < width - dilateRadius; x++) {
-      if (result[y * width + x] === 255) {
-        for (let dy = -dilateRadius; dy <= dilateRadius; dy++) {
-          for (let dx = -dilateRadius; dx <= dilateRadius; dx++) {
-            if (dx * dx + dy * dy <= dilateRadius * dilateRadius + 1) {
-              dilated[(y + dy) * width + (x + dx)] = 255;
+  if (dilateRadius === 0) {
+    // No dilation, just copy
+    dilated.set(result);
+  } else {
+    for (let y = dilateRadius; y < height - dilateRadius; y++) {
+      for (let x = dilateRadius; x < width - dilateRadius; x++) {
+        if (result[y * width + x] === 255) {
+          for (let dy = -dilateRadius; dy <= dilateRadius; dy++) {
+            for (let dx = -dilateRadius; dx <= dilateRadius; dx++) {
+              if (dx * dx + dy * dy <= dilateRadius * dilateRadius + 1) {
+                dilated[(y + dy) * width + (x + dx)] = 255;
+              }
             }
           }
         }
@@ -184,13 +240,14 @@ const detectPalmLines = (imageData, sensitivity = 50, lineThickness = 2, vlmMask
     }
   }
 
+  // Output golden colored lines
   for (let i = 0; i < data.length; i += 4) {
     const idx = i / 4;
     if (dilated[idx] === 255) {
-      output[i] = 255;
-      output[i + 1] = 200;
-      output[i + 2] = 100;
-      output[i + 3] = 255;
+      output[i] = 255;     // R
+      output[i + 1] = 200; // G
+      output[i + 2] = 100; // B
+      output[i + 3] = 255; // A
     } else {
       output[i] = 0;
       output[i + 1] = 0;
