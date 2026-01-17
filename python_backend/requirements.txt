@@ -1,0 +1,25 @@
+# Core CV Libraries
+opencv-python>=4.8.0
+numpy>=1.24.0
+scikit-image>=0.21.0
+
+# Deep Learning
+torch>=2.0.0
+torchvision>=0.15.0
+
+# Grounding DINO (install from source)
+# pip install git+https://github.com/IDEA-Research/GroundingDINO.git
+
+# Segment Anything Model
+# pip install git+https://github.com/facebookresearch/segment-anything.git
+
+# API Server
+flask>=2.3.0
+flask-cors>=4.0.0
+pillow>=10.0.0
+
+# Visualization
+matplotlib>=3.7.0
+
+# Utilities
+tqdm>=4.65.0
