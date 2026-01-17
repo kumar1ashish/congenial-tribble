@@ -1,7 +1,14 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
+import {
+  analyzeWithVLM,
+  generateVLMGuidedMask,
+  combineEdgeDetectionWithVLM,
+  LINE_COLORS,
+  VLM_PROVIDERS,
+} from './vlmService';
 
 // Palm line detection using edge detection and line enhancement
-const detectPalmLines = (imageData, sensitivity = 50, lineThickness = 2) => {
+const detectPalmLines = (imageData, sensitivity = 50, lineThickness = 2, vlmMask = null, vlmWeight = 0.5) => {
   const { data, width, height } = imageData;
   const gray = new Float32Array(width * height);
   const output = new Uint8ClampedArray(data.length);
@@ -120,12 +127,25 @@ const detectPalmLines = (imageData, sensitivity = 50, lineThickness = 2) => {
   // Hysteresis thresholding with line enhancement
   const result = new Uint8Array(width * height);
 
+  // VLM-enhanced thresholding: lower threshold in VLM-detected areas
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       const idx = y * width + x;
-      if (suppressed[idx] > threshold) {
+
+      // If VLM mask provided, use adaptive threshold based on VLM guidance
+      let effectiveThreshold = threshold;
+      let effectiveLowThreshold = lowThreshold;
+
+      if (vlmMask && vlmMask[idx] > 0) {
+        // Lower threshold significantly in VLM-detected line areas
+        const vlmFactor = 1 - (vlmWeight * 0.7);
+        effectiveThreshold = threshold * vlmFactor;
+        effectiveLowThreshold = lowThreshold * vlmFactor;
+      }
+
+      if (suppressed[idx] > effectiveThreshold) {
         result[idx] = 255;
-      } else if (suppressed[idx] > lowThreshold) {
+      } else if (suppressed[idx] > effectiveLowThreshold) {
         // Check if connected to strong edge
         let connected = false;
         for (let dy = -1; dy <= 1 && !connected; dy++) {
@@ -133,13 +153,18 @@ const detectPalmLines = (imageData, sensitivity = 50, lineThickness = 2) => {
             const ny = y + dy;
             const nx = x + dx;
             if (ny >= 0 && ny < height && nx >= 0 && nx < width) {
-              if (suppressed[ny * width + nx] > threshold) {
+              if (suppressed[ny * width + nx] > effectiveThreshold) {
                 connected = true;
               }
             }
           }
         }
         if (connected) result[idx] = 255;
+
+        // Also include if in VLM-detected area and has some edge strength
+        if (!connected && vlmMask && vlmMask[idx] > 0 && suppressed[idx] > lowThreshold * 0.3) {
+          result[idx] = 255;
+        }
       }
     }
   }
@@ -224,7 +249,26 @@ export default function PalmReader() {
   const canvasRef = useRef(null);
   const fileInputRef = useRef(null);
 
-  const processImage = useCallback((imgSrc, sens = sensitivity, thickness = lineThickness) => {
+  // VLM-related state
+  const [vlmEnabled, setVlmEnabled] = useState(false);
+  const [vlmProvider, setVlmProvider] = useState(VLM_PROVIDERS.OPENAI);
+  const [apiKey, setApiKey] = useState(() => localStorage.getItem('vlm_api_key') || '');
+  const [vlmResult, setVlmResult] = useState(null);
+  const [vlmMask, setVlmMask] = useState(null);
+  const [vlmWeight, setVlmWeight] = useState(0.6);
+  const [vlmProcessing, setVlmProcessing] = useState(false);
+  const [vlmError, setVlmError] = useState(null);
+  const [showSettings, setShowSettings] = useState(false);
+  const [showLineLabels, setShowLineLabels] = useState(true);
+
+  // Save API key to localStorage when changed
+  useEffect(() => {
+    if (apiKey) {
+      localStorage.setItem('vlm_api_key', apiKey);
+    }
+  }, [apiKey]);
+
+  const processImage = useCallback((imgSrc, sens = sensitivity, thickness = lineThickness, currentVlmMask = vlmMask, currentVlmWeight = vlmWeight) => {
     setIsProcessing(true);
 
     const img = new Image();
@@ -246,7 +290,10 @@ export default function PalmReader() {
       ctx.drawImage(img, 0, 0, width, height);
 
       const imageData = ctx.getImageData(0, 0, width, height);
-      const processed = detectPalmLines(imageData, sens, thickness);
+
+      // Pass VLM mask if available and VLM is enabled
+      const maskToUse = vlmEnabled && currentVlmMask ? currentVlmMask : null;
+      const processed = detectPalmLines(imageData, sens, thickness, maskToUse, currentVlmWeight);
 
       // Create processed image URL
       const tempCanvas = document.createElement('canvas');
@@ -259,7 +306,52 @@ export default function PalmReader() {
       setIsProcessing(false);
     };
     img.src = imgSrc;
-  }, [sensitivity, lineThickness]);
+  }, [sensitivity, lineThickness, vlmMask, vlmWeight, vlmEnabled]);
+
+  // VLM analysis function
+  const runVLMAnalysis = useCallback(async (imgSrc) => {
+    if (!apiKey) {
+      setVlmError('Please enter an API key in settings');
+      setShowSettings(true);
+      return;
+    }
+
+    setVlmProcessing(true);
+    setVlmError(null);
+
+    try {
+      const result = await analyzeWithVLM(imgSrc, vlmProvider, apiKey);
+      setVlmResult(result);
+
+      // Generate VLM-guided mask if we have line data
+      if (result.lines && result.lines.length > 0) {
+        // Get image dimensions
+        const img = new Image();
+        img.onload = () => {
+          const maxSize = 800;
+          let { width, height } = img;
+          if (width > maxSize || height > maxSize) {
+            const ratio = Math.min(maxSize / width, maxSize / height);
+            width = Math.round(width * ratio);
+            height = Math.round(height * ratio);
+          }
+
+          const mask = generateVLMGuidedMask(result, width, height, 12);
+          setVlmMask(mask);
+
+          // Reprocess image with VLM guidance
+          processImage(imgSrc, sensitivity, lineThickness, mask, vlmWeight);
+        };
+        img.src = imgSrc;
+      }
+
+      setVlmProcessing(false);
+    } catch (err) {
+      console.error('VLM analysis error:', err);
+      setVlmError(err.message);
+      setVlmProcessing(false);
+    }
+  }, [apiKey, vlmProvider, sensitivity, lineThickness, vlmWeight, processImage]);
 
   const handleFileUpload = (e) => {
     const file = e.target.files?.[0];
@@ -292,9 +384,16 @@ export default function PalmReader() {
 
   useEffect(() => {
     if (image) {
-      processImage(image, sensitivity, lineThickness);
+      processImage(image, sensitivity, lineThickness, vlmMask, vlmWeight);
     }
-  }, [sensitivity, lineThickness]);
+  }, [sensitivity, lineThickness, vlmWeight, vlmEnabled]);
+
+  // Rerun VLM analysis when VLM is enabled and we have an image
+  useEffect(() => {
+    if (vlmEnabled && image && !vlmResult && apiKey) {
+      runVLMAnalysis(image);
+    }
+  }, [vlmEnabled, image, apiKey]);
 
   return (
     <div style={{
@@ -592,6 +691,52 @@ export default function PalmReader() {
                       }}
                     />
                   )}
+
+                  {/* VLM Line Labels Overlay */}
+                  {vlmEnabled && showLineLabels && vlmResult && vlmResult.lines && vlmResult.lines.length > 0 && !showOriginal && (
+                    <div style={{
+                      position: 'absolute',
+                      top: 0,
+                      left: 0,
+                      width: '100%',
+                      height: '100%',
+                      pointerEvents: 'none',
+                    }}>
+                      {vlmResult.lines.map((line, idx) => {
+                        const color = LINE_COLORS[line.name] || LINE_COLORS.default;
+                        // Position label at the midpoint of the line
+                        const labelX = line.startX !== undefined && line.endX !== undefined
+                          ? (line.startX + line.endX) / 2
+                          : 50;
+                        const labelY = line.startY !== undefined && line.endY !== undefined
+                          ? Math.min(line.startY, line.endY) - 5
+                          : 50;
+
+                        return (
+                          <div
+                            key={idx}
+                            style={{
+                              position: 'absolute',
+                              left: `${labelX}%`,
+                              top: `${labelY}%`,
+                              transform: 'translate(-50%, -100%)',
+                              padding: '3px 8px',
+                              background: `rgba(${color.r}, ${color.g}, ${color.b}, 0.85)`,
+                              borderRadius: 4,
+                              fontSize: '0.65rem',
+                              fontWeight: 600,
+                              color: '#fff',
+                              textShadow: '0 1px 2px rgba(0,0,0,0.5)',
+                              whiteSpace: 'nowrap',
+                              zIndex: 10,
+                            }}
+                          >
+                            {line.name}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -655,6 +800,9 @@ export default function PalmReader() {
                     onClick={() => {
                       setImage(null);
                       setProcessedImage(null);
+                      setVlmResult(null);
+                      setVlmMask(null);
+                      setVlmError(null);
                     }}
                     style={{
                       padding: '12px 25px',
@@ -671,7 +819,247 @@ export default function PalmReader() {
                   >
                     New Reading
                   </button>
+
+                  <button
+                    onClick={() => setVlmEnabled(!vlmEnabled)}
+                    style={{
+                      padding: '12px 25px',
+                      background: vlmEnabled
+                        ? 'linear-gradient(135deg, rgba(100, 150, 255, 0.3), rgba(75, 100, 200, 0.3))'
+                        : 'transparent',
+                      border: '1px solid rgba(100, 150, 255, 0.5)',
+                      borderRadius: 30,
+                      color: vlmEnabled ? '#a0c4ff' : 'rgba(160, 196, 255, 0.7)',
+                      fontFamily: '"Cinzel", serif',
+                      fontSize: '0.85rem',
+                      letterSpacing: '0.08em',
+                      cursor: 'pointer',
+                      transition: 'all 0.3s ease',
+                    }}
+                  >
+                    {vlmEnabled ? '✦ AI Vision On' : '○ AI Vision Off'}
+                  </button>
+
+                  <button
+                    onClick={() => setShowSettings(!showSettings)}
+                    style={{
+                      padding: '12px 20px',
+                      background: 'transparent',
+                      border: '1px solid rgba(212, 175, 55, 0.3)',
+                      borderRadius: 30,
+                      color: 'rgba(212, 175, 55, 0.7)',
+                      fontFamily: '"Cinzel", serif',
+                      fontSize: '0.85rem',
+                      letterSpacing: '0.08em',
+                      cursor: 'pointer',
+                      transition: 'all 0.3s ease',
+                    }}
+                  >
+                    Settings
+                  </button>
                 </div>
+
+                {/* VLM Status/Error */}
+                {vlmEnabled && (vlmProcessing || vlmError) && (
+                  <div style={{
+                    marginBottom: 20,
+                    padding: '12px 20px',
+                    background: vlmError ? 'rgba(200, 100, 100, 0.15)' : 'rgba(100, 150, 255, 0.15)',
+                    borderRadius: 10,
+                    border: `1px solid ${vlmError ? 'rgba(200, 100, 100, 0.3)' : 'rgba(100, 150, 255, 0.3)'}`,
+                    textAlign: 'center',
+                    fontSize: '0.85rem',
+                  }}>
+                    {vlmProcessing ? (
+                      <span style={{ color: '#a0c4ff' }}>Analyzing palm with AI vision model...</span>
+                    ) : vlmError ? (
+                      <span style={{ color: '#ffb0b0' }}>{vlmError}</span>
+                    ) : null}
+                  </div>
+                )}
+
+                {/* VLM Detected Lines */}
+                {vlmEnabled && vlmResult && vlmResult.lines && vlmResult.lines.length > 0 && (
+                  <div style={{
+                    marginBottom: 20,
+                    padding: '15px 20px',
+                    background: 'rgba(100, 150, 255, 0.1)',
+                    borderRadius: 12,
+                    border: '1px solid rgba(100, 150, 255, 0.2)',
+                  }}>
+                    <div style={{
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      marginBottom: 12,
+                    }}>
+                      <h4 style={{
+                        fontFamily: '"Cinzel", serif',
+                        fontSize: '0.9rem',
+                        letterSpacing: '0.08em',
+                        color: '#a0c4ff',
+                        margin: 0,
+                      }}>
+                        AI Detected Lines
+                      </h4>
+                      <button
+                        onClick={() => setShowLineLabels(!showLineLabels)}
+                        style={{
+                          padding: '5px 12px',
+                          background: showLineLabels ? 'rgba(100, 150, 255, 0.2)' : 'transparent',
+                          border: '1px solid rgba(100, 150, 255, 0.3)',
+                          borderRadius: 15,
+                          color: '#a0c4ff',
+                          fontSize: '0.75rem',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        {showLineLabels ? 'Labels On' : 'Labels Off'}
+                      </button>
+                    </div>
+                    <div style={{
+                      display: 'flex',
+                      flexWrap: 'wrap',
+                      gap: 8,
+                    }}>
+                      {vlmResult.lines.map((line, idx) => {
+                        const color = LINE_COLORS[line.name] || LINE_COLORS.default;
+                        return (
+                          <span
+                            key={idx}
+                            style={{
+                              padding: '4px 12px',
+                              background: `rgba(${color.r}, ${color.g}, ${color.b}, 0.2)`,
+                              border: `1px solid rgba(${color.r}, ${color.g}, ${color.b}, 0.4)`,
+                              borderRadius: 15,
+                              fontSize: '0.8rem',
+                              color: `rgb(${Math.min(255, color.r + 50)}, ${Math.min(255, color.g + 50)}, ${Math.min(255, color.b + 50)})`,
+                            }}
+                          >
+                            {line.name}
+                          </span>
+                        );
+                      })}
+                    </div>
+                    {vlmResult.palmQuality && (
+                      <p style={{
+                        marginTop: 10,
+                        marginBottom: 0,
+                        fontSize: '0.8rem',
+                        color: 'rgba(232, 220, 200, 0.6)',
+                      }}>
+                        Image quality: <span style={{ color: '#a0c4ff' }}>{vlmResult.palmQuality}</span>
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                {/* Settings Panel */}
+                {showSettings && (
+                  <div style={{
+                    marginBottom: 25,
+                    padding: '20px',
+                    background: 'rgba(30, 25, 45, 0.8)',
+                    borderRadius: 12,
+                    border: '1px solid rgba(212, 175, 55, 0.2)',
+                  }}>
+                    <h4 style={{
+                      fontFamily: '"Cinzel", serif',
+                      fontSize: '0.95rem',
+                      letterSpacing: '0.08em',
+                      color: '#d4af37',
+                      marginTop: 0,
+                      marginBottom: 15,
+                    }}>
+                      AI Vision Settings
+                    </h4>
+
+                    <div style={{ marginBottom: 15 }}>
+                      <label style={{
+                        display: 'block',
+                        marginBottom: 8,
+                        fontSize: '0.85rem',
+                        color: 'rgba(232, 220, 200, 0.8)',
+                      }}>
+                        Provider
+                      </label>
+                      <select
+                        value={vlmProvider}
+                        onChange={(e) => setVlmProvider(e.target.value)}
+                        style={{
+                          width: '100%',
+                          padding: '10px 15px',
+                          background: 'rgba(20, 15, 30, 0.8)',
+                          border: '1px solid rgba(212, 175, 55, 0.3)',
+                          borderRadius: 8,
+                          color: '#e8dcc8',
+                          fontSize: '0.9rem',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        <option value={VLM_PROVIDERS.OPENAI}>OpenAI (GPT-4o)</option>
+                        <option value={VLM_PROVIDERS.ANTHROPIC}>Anthropic (Claude)</option>
+                      </select>
+                    </div>
+
+                    <div style={{ marginBottom: 15 }}>
+                      <label style={{
+                        display: 'block',
+                        marginBottom: 8,
+                        fontSize: '0.85rem',
+                        color: 'rgba(232, 220, 200, 0.8)',
+                      }}>
+                        API Key
+                      </label>
+                      <input
+                        type="password"
+                        value={apiKey}
+                        onChange={(e) => setApiKey(e.target.value)}
+                        placeholder={`Enter your ${vlmProvider === VLM_PROVIDERS.OPENAI ? 'OpenAI' : 'Anthropic'} API key`}
+                        style={{
+                          width: '100%',
+                          padding: '10px 15px',
+                          background: 'rgba(20, 15, 30, 0.8)',
+                          border: '1px solid rgba(212, 175, 55, 0.3)',
+                          borderRadius: 8,
+                          color: '#e8dcc8',
+                          fontSize: '0.9rem',
+                          boxSizing: 'border-box',
+                        }}
+                      />
+                      <p style={{
+                        marginTop: 5,
+                        marginBottom: 0,
+                        fontSize: '0.75rem',
+                        color: 'rgba(232, 220, 200, 0.5)',
+                      }}>
+                        Your API key is stored locally in your browser
+                      </p>
+                    </div>
+
+                    {vlmEnabled && apiKey && (
+                      <button
+                        onClick={() => runVLMAnalysis(image)}
+                        disabled={vlmProcessing}
+                        style={{
+                          width: '100%',
+                          padding: '12px 20px',
+                          background: vlmProcessing ? 'rgba(100, 150, 255, 0.2)' : 'linear-gradient(135deg, rgba(100, 150, 255, 0.3), rgba(75, 100, 200, 0.3))',
+                          border: '1px solid rgba(100, 150, 255, 0.5)',
+                          borderRadius: 8,
+                          color: '#a0c4ff',
+                          fontFamily: '"Cinzel", serif',
+                          fontSize: '0.85rem',
+                          letterSpacing: '0.05em',
+                          cursor: vlmProcessing ? 'wait' : 'pointer',
+                          transition: 'all 0.3s ease',
+                        }}
+                      >
+                        {vlmProcessing ? 'Analyzing...' : 'Re-analyze with AI'}
+                      </button>
+                    )}
+                  </div>
+                )}
 
                 {/* Sliders */}
                 <div style={{
@@ -756,6 +1144,48 @@ export default function PalmReader() {
                       <span>Bold</span>
                     </div>
                   </div>
+
+                  {/* VLM Weight Slider - only show when VLM is enabled */}
+                  {vlmEnabled && vlmMask && (
+                    <div>
+                      <label style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        marginBottom: 10,
+                        fontSize: '0.85rem',
+                        letterSpacing: '0.08em',
+                        color: 'rgba(160, 196, 255, 0.8)',
+                      }}>
+                        <span>AI Guidance Strength</span>
+                        <span style={{ color: '#a0c4ff' }}>{Math.round(vlmWeight * 100)}%</span>
+                      </label>
+                      <input
+                        type="range"
+                        min="0"
+                        max="100"
+                        value={vlmWeight * 100}
+                        onChange={(e) => setVlmWeight(Number(e.target.value) / 100)}
+                        className="control-slider"
+                        style={{
+                          width: '100%',
+                          height: 20,
+                          background: 'transparent',
+                          cursor: 'pointer',
+                          WebkitAppearance: 'none',
+                        }}
+                      />
+                      <div style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        fontSize: '0.7rem',
+                        color: 'rgba(160, 196, 255, 0.4)',
+                        marginTop: 5,
+                      }}>
+                        <span>Traditional</span>
+                        <span>AI Enhanced</span>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
@@ -795,6 +1225,9 @@ export default function PalmReader() {
                 </div>
                 <div>
                   <strong style={{ color: '#d4af37' }}>Best Results:</strong> Use a clear, high-contrast photo with good lighting and minimal shadows.
+                </div>
+                <div>
+                  <strong style={{ color: '#a0c4ff' }}>AI Vision:</strong> Enable AI Vision mode for intelligent line detection. The AI identifies major palm lines (Heart, Head, Life, Fate) and enhances edge detection accuracy.
                 </div>
               </div>
             </div>
