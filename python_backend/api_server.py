@@ -333,7 +333,8 @@ def configure_pipeline():
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
+    # Use port 5001 by default to avoid AirPlay conflict on macOS
+    port = int(os.environ.get("PORT", 5001))
     debug = os.environ.get("DEBUG", "false").lower() == "true"
 
     print(f"Starting Palm Line Detection API on port {port}")
