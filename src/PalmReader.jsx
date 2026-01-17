@@ -518,7 +518,7 @@ const LineAnnotationCanvas = ({ vlmResult, width, height }) => {
   );
 };
 
-// Reading Section Component
+// Reading Section Component - Comprehensive Palm Reading Display
 const ReadingSection = ({ reading, isGenerating }) => {
   if (isGenerating) {
     return (
@@ -549,37 +549,203 @@ const ReadingSection = ({ reading, isGenerating }) => {
 
   if (!reading) return null;
 
-  const renderLineReading = (lineData, icon) => {
-    if (!lineData) return null;
+  // Render a comprehensive section with title, icon, and detailed content
+  const renderSection = (section, icon, accentColor = '#d4af37') => {
+    if (!section) return null;
+
     return (
       <div style={{
         marginBottom: 25,
         padding: '20px',
         background: 'rgba(20, 15, 35, 0.6)',
         borderRadius: 12,
-        border: '1px solid rgba(212, 175, 55, 0.15)',
+        border: `1px solid ${accentColor}30`,
       }}>
         <h4 style={{
           fontFamily: '"Cinzel", serif',
           fontSize: '1rem',
-          color: '#d4af37',
+          color: accentColor,
           marginTop: 0,
-          marginBottom: 12,
+          marginBottom: 15,
           display: 'flex',
           alignItems: 'center',
           gap: 10,
         }}>
           <span>{icon}</span>
-          {lineData.title || lineData.name}
+          {section.title}
         </h4>
-        <p style={{
-          fontSize: '0.95rem',
-          lineHeight: 1.8,
-          color: 'rgba(232, 220, 200, 0.85)',
-          margin: 0,
+
+        {/* Detailed Reading */}
+        {section.detailedReading && (
+          <p style={{
+            fontSize: '0.95rem',
+            lineHeight: 1.8,
+            color: 'rgba(232, 220, 200, 0.85)',
+            margin: 0,
+            marginBottom: 15,
+          }}>
+            {section.detailedReading}
+          </p>
+        )}
+
+        {/* Key Points as Tags */}
+        {section.suitablePaths && (
+          <div style={{ marginTop: 12 }}>
+            <span style={{ fontSize: '0.8rem', color: 'rgba(232, 220, 200, 0.6)' }}>Suited for: </span>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6 }}>
+              {section.suitablePaths.map((path, idx) => (
+                <span key={idx} style={{
+                  padding: '4px 10px',
+                  background: `${accentColor}20`,
+                  borderRadius: 12,
+                  fontSize: '0.75rem',
+                  color: accentColor,
+                }}>
+                  {path}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {section.incomeSources && (
+          <div style={{ marginTop: 12 }}>
+            <span style={{ fontSize: '0.8rem', color: 'rgba(232, 220, 200, 0.6)' }}>Income Sources: </span>
+            <span style={{ fontSize: '0.85rem', color: 'rgba(232, 220, 200, 0.8)' }}>
+              {section.incomeSources.join(', ')}
+            </span>
+          </div>
+        )}
+
+        {section.areasOfSuccess && (
+          <div style={{ marginTop: 12 }}>
+            <span style={{ fontSize: '0.8rem', color: 'rgba(232, 220, 200, 0.6)' }}>Areas of Success: </span>
+            <span style={{ fontSize: '0.85rem', color: 'rgba(232, 220, 200, 0.8)' }}>
+              {section.areasOfSuccess.join(', ')}
+            </span>
+          </div>
+        )}
+
+        {section.marriageTiming && (
+          <div style={{ marginTop: 10 }}>
+            <span style={{ fontSize: '0.8rem', color: 'rgba(232, 220, 200, 0.6)' }}>Timing: </span>
+            <span style={{ fontSize: '0.85rem', color: accentColor }}>{section.marriageTiming}</span>
+          </div>
+        )}
+
+        {section.childrenIndicated && (
+          <div style={{ marginTop: 10 }}>
+            <span style={{ fontSize: '0.8rem', color: 'rgba(232, 220, 200, 0.6)' }}>Children Indicated: </span>
+            <span style={{ fontSize: '0.85rem', color: accentColor }}>{section.childrenIndicated}</span>
+          </div>
+        )}
+
+        {section.overallVitality && (
+          <div style={{ marginTop: 10 }}>
+            <span style={{ fontSize: '0.8rem', color: 'rgba(232, 220, 200, 0.6)' }}>Vitality: </span>
+            <span style={{ fontSize: '0.85rem', color: accentColor }}>{section.overallVitality}</span>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // Render personality section with traits
+  const renderPersonality = () => {
+    if (!reading.personality) return null;
+
+    return (
+      <div style={{
+        marginBottom: 25,
+        padding: '20px',
+        background: 'rgba(20, 15, 35, 0.6)',
+        borderRadius: 12,
+        border: '1px solid rgba(180, 100, 255, 0.2)',
+      }}>
+        <h4 style={{
+          fontFamily: '"Cinzel", serif',
+          fontSize: '1rem',
+          color: '#c0a0ff',
+          marginTop: 0,
+          marginBottom: 15,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 10,
         }}>
-          {lineData.interpretation}
-        </p>
+          <span>✦</span>
+          {reading.personality.title || 'Your Inner Nature'}
+        </h4>
+
+        {/* Core Traits */}
+        {reading.personality.coreTraits && (
+          <div style={{ marginBottom: 15 }}>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+              {reading.personality.coreTraits.map((trait, idx) => (
+                <span key={idx} style={{
+                  padding: '5px 12px',
+                  background: 'rgba(180, 100, 255, 0.15)',
+                  borderRadius: 15,
+                  fontSize: '0.8rem',
+                  color: '#c0a0ff',
+                  border: '1px solid rgba(180, 100, 255, 0.3)',
+                }}>
+                  {trait}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {reading.personality.emotionalNature && (
+          <div style={{ marginBottom: 12 }}>
+            <span style={{ fontSize: '0.8rem', color: '#ff5078', fontWeight: 500 }}>Emotional Nature: </span>
+            <span style={{ fontSize: '0.9rem', color: 'rgba(232, 220, 200, 0.85)' }}>
+              {reading.personality.emotionalNature}
+            </span>
+          </div>
+        )}
+
+        {reading.personality.mentalApproach && (
+          <div style={{ marginBottom: 12 }}>
+            <span style={{ fontSize: '0.8rem', color: '#50b4ff', fontWeight: 500 }}>Mental Approach: </span>
+            <span style={{ fontSize: '0.9rem', color: 'rgba(232, 220, 200, 0.85)' }}>
+              {reading.personality.mentalApproach}
+            </span>
+          </div>
+        )}
+
+        {reading.personality.temperament && (
+          <div style={{ marginBottom: 12 }}>
+            <span style={{ fontSize: '0.8rem', color: '#50dc78', fontWeight: 500 }}>Temperament: </span>
+            <span style={{ fontSize: '0.9rem', color: 'rgba(232, 220, 200, 0.85)' }}>
+              {reading.personality.temperament}
+            </span>
+          </div>
+        )}
+
+        {/* Strengths and Growth Areas */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 15, marginTop: 15 }}>
+          {reading.personality.strengths && (
+            <div>
+              <span style={{ fontSize: '0.75rem', color: '#50dc78', display: 'block', marginBottom: 6 }}>Strengths</span>
+              {reading.personality.strengths.map((s, idx) => (
+                <div key={idx} style={{ fontSize: '0.85rem', color: 'rgba(232, 220, 200, 0.8)', marginBottom: 4 }}>
+                  + {s}
+                </div>
+              ))}
+            </div>
+          )}
+          {reading.personality.growthAreas && (
+            <div>
+              <span style={{ fontSize: '0.75rem', color: '#ffc832', display: 'block', marginBottom: 6 }}>Growth Areas</span>
+              {reading.personality.growthAreas.map((g, idx) => (
+                <div key={idx} style={{ fontSize: '0.85rem', color: 'rgba(232, 220, 200, 0.8)', marginBottom: 4 }}>
+                  ~ {g}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
     );
   };
@@ -619,75 +785,142 @@ const ReadingSection = ({ reading, isGenerating }) => {
         </div>
       )}
 
-      {/* Main Line Readings */}
-      {renderLineReading(reading.heartLine, '❤')}
-      {renderLineReading(reading.headLine, '🧠')}
-      {renderLineReading(reading.lifeLine, '✨')}
+      {/* Personality Section */}
+      {renderPersonality()}
 
-      {/* Other Lines */}
-      {reading.otherLines && reading.otherLines.length > 0 && (
-        <div style={{ marginBottom: 25 }}>
-          {reading.otherLines.map((line, idx) => (
-            <div key={idx} style={{
-              marginBottom: 15,
-              padding: '15px 20px',
-              background: 'rgba(20, 15, 35, 0.5)',
-              borderRadius: 10,
-              border: '1px solid rgba(212, 175, 55, 0.1)',
-            }}>
-              <h5 style={{
-                fontFamily: '"Cinzel", serif',
-                fontSize: '0.9rem',
-                color: '#d4af37',
-                marginTop: 0,
-                marginBottom: 8,
-              }}>
-                {line.title || line.name}
-              </h5>
-              <p style={{
-                fontSize: '0.9rem',
-                lineHeight: 1.7,
-                color: 'rgba(232, 220, 200, 0.8)',
-                margin: 0,
-              }}>
-                {line.interpretation}
-              </p>
-            </div>
-          ))}
-        </div>
-      )}
+      {/* Career & Occupation */}
+      {renderSection(reading.career, '💼', '#ffc832')}
 
-      {/* Special Features */}
-      {reading.specialFeatures && (
+      {/* Financial Outlook */}
+      {renderSection(reading.finance, '💰', '#50dc78')}
+
+      {/* Marriage & Relationships */}
+      {renderSection(reading.marriage, '💕', '#ff5078')}
+
+      {/* Children & Family */}
+      {renderSection(reading.children, '👶', '#ff82b4')}
+
+      {/* Success & Achievement */}
+      {renderSection(reading.success, '🏆', '#ffc832')}
+
+      {/* Social Status */}
+      {renderSection(reading.socialStatus, '👑', '#b464ff')}
+
+      {/* Health & Vitality */}
+      {renderSection(reading.health, '💪', '#50dc78')}
+
+      {/* Life Path Summary */}
+      {reading.lifePath && (
         <div style={{
           marginBottom: 25,
-          padding: '15px 20px',
-          background: 'rgba(100, 80, 150, 0.15)',
-          borderRadius: 10,
-          border: '1px solid rgba(150, 120, 200, 0.2)',
+          padding: '25px',
+          background: 'linear-gradient(135deg, rgba(20, 15, 35, 0.8), rgba(30, 25, 50, 0.6))',
+          borderRadius: 15,
+          border: '1px solid rgba(212, 175, 55, 0.2)',
         }}>
-          <h5 style={{
+          <h4 style={{
             fontFamily: '"Cinzel", serif',
-            fontSize: '0.9rem',
-            color: '#c0a0ff',
+            fontSize: '1.1rem',
+            color: '#f5d76e',
             marginTop: 0,
-            marginBottom: 8,
+            marginBottom: 15,
+            textAlign: 'center',
           }}>
-            Special Markings
-          </h5>
+            ✧ {reading.lifePath.title || 'Your Life\'s Narrative'} ✧
+          </h4>
           <p style={{
-            fontSize: '0.9rem',
-            lineHeight: 1.7,
-            color: 'rgba(232, 220, 200, 0.8)',
+            fontSize: '1rem',
+            lineHeight: 1.9,
+            color: 'rgba(232, 220, 200, 0.9)',
             margin: 0,
+            textAlign: 'center',
           }}>
-            {reading.specialFeatures}
+            {reading.lifePath.summary}
           </p>
         </div>
       )}
 
-      {/* Overall Reading */}
-      {reading.overallReading && (
+      {/* Guidance Section */}
+      {reading.guidance && (
+        <div style={{
+          padding: '25px',
+          background: 'linear-gradient(135deg, rgba(139, 105, 20, 0.2), rgba(212, 175, 55, 0.1))',
+          borderRadius: 15,
+          border: '2px solid rgba(212, 175, 55, 0.3)',
+        }}>
+          <h4 style={{
+            fontFamily: '"Cinzel", serif',
+            fontSize: '1rem',
+            color: '#d4af37',
+            marginTop: 0,
+            marginBottom: 15,
+            textAlign: 'center',
+          }}>
+            {reading.guidance.title || 'Wisdom for Your Journey'}
+          </h4>
+
+          {/* Advice Points */}
+          {reading.guidance.advice && Array.isArray(reading.guidance.advice) && (
+            <div style={{ marginBottom: 15 }}>
+              {reading.guidance.advice.map((advice, idx) => (
+                <div key={idx} style={{
+                  display: 'flex',
+                  alignItems: 'flex-start',
+                  gap: 10,
+                  marginBottom: 10,
+                  padding: '10px 15px',
+                  background: 'rgba(20, 15, 35, 0.4)',
+                  borderRadius: 8,
+                }}>
+                  <span style={{ color: '#d4af37', fontSize: '1rem' }}>✧</span>
+                  <span style={{
+                    fontSize: '0.9rem',
+                    lineHeight: 1.7,
+                    color: 'rgba(232, 220, 200, 0.85)',
+                  }}>
+                    {advice}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Closing Affirmation */}
+          {reading.guidance.affirmation && (
+            <p style={{
+              fontFamily: '"Cormorant Garamond", serif',
+              fontSize: '1.1rem',
+              fontStyle: 'italic',
+              lineHeight: 1.8,
+              color: '#f5d76e',
+              margin: 0,
+              textAlign: 'center',
+              paddingTop: 10,
+              borderTop: '1px solid rgba(212, 175, 55, 0.2)',
+            }}>
+              "{reading.guidance.affirmation}"
+            </p>
+          )}
+
+          {/* Fallback for simple string guidance */}
+          {typeof reading.guidance === 'string' && (
+            <p style={{
+              fontFamily: '"Cormorant Garamond", serif',
+              fontSize: '1.1rem',
+              fontStyle: 'italic',
+              lineHeight: 1.8,
+              color: '#f5d76e',
+              margin: 0,
+              textAlign: 'center',
+            }}>
+              {reading.guidance}
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* Legacy support for old format */}
+      {reading.overallReading && !reading.lifePath && (
         <div style={{
           marginBottom: 25,
           padding: '25px',
@@ -713,37 +946,6 @@ const ReadingSection = ({ reading, isGenerating }) => {
             textAlign: 'center',
           }}>
             {reading.overallReading}
-          </p>
-        </div>
-      )}
-
-      {/* Guidance */}
-      {reading.guidance && (
-        <div style={{
-          padding: '25px',
-          background: 'linear-gradient(135deg, rgba(139, 105, 20, 0.2), rgba(212, 175, 55, 0.1))',
-          borderRadius: 15,
-          border: '2px solid rgba(212, 175, 55, 0.3)',
-          textAlign: 'center',
-        }}>
-          <h4 style={{
-            fontFamily: '"Cinzel", serif',
-            fontSize: '1rem',
-            color: '#d4af37',
-            marginTop: 0,
-            marginBottom: 12,
-          }}>
-            Guidance for Your Path
-          </h4>
-          <p style={{
-            fontFamily: '"Cormorant Garamond", serif',
-            fontSize: '1.1rem',
-            fontStyle: 'italic',
-            lineHeight: 1.8,
-            color: '#f5d76e',
-            margin: 0,
-          }}>
-            {reading.guidance}
           </p>
         </div>
       )}

@@ -1,97 +1,267 @@
 // Vision Language Model Service for Palm Line Detection and Reading
-// Uses Anthropic Claude for palm analysis
+// Uses Anthropic Claude for comprehensive palm analysis
 
-// Enhanced prompt for detailed palm line detection with control points
-const PALM_ANALYSIS_PROMPT = `You are an expert palmistry analyst. Analyze this palm image carefully and identify ALL visible palm lines with precise coordinates.
+// Comprehensive prompt for detailed palm analysis
+const PALM_ANALYSIS_PROMPT = `You are a world-renowned palmistry expert with decades of experience. Analyze this palm image with extreme precision and detail.
 
-For each line, provide:
-1. Line name (Heart Line, Head Line, Life Line, Fate Line, Sun Line, Mercury Line, Marriage Lines, etc.)
-2. Multiple control points along the line path (at least 4-6 points per line) as percentage coordinates (0-100 for both x and y, where 0,0 is top-left)
-3. Line characteristics (depth: deep/medium/faint, length: long/medium/short, curvature: straight/slightly-curved/curved/very-curved)
-4. Any special features (breaks, branches, islands, chains, crosses)
+## REQUIRED ANALYSIS
 
-IMPORTANT COORDINATE GUIDELINES:
-- Heart Line: Usually runs horizontally across upper palm, from edge near pinky towards index finger area (y typically 20-35%)
-- Head Line: Below heart line, runs across middle of palm (y typically 40-55%)
-- Life Line: Curves around the thumb base, starts between thumb and index finger (starts around x:30-40%, y:15-25%, curves down to x:20-35%, y:80-90%)
-- Fate Line: Vertical line running up the center of palm (x typically 45-55%)
-- Sun Line: Vertical line below ring finger area (x typically 60-70%)
+### 1. MAJOR LINES (with coordinates as percentage 0-100, where 0,0 is top-left)
+For each line provide: name, control points (4-6 points), depth (deep/medium/faint), length (long/medium/short), curvature, and special features.
 
-Respond ONLY with valid JSON in this exact format:
+- **Heart Line**: Emotional nature, relationships, cardiac health indicators
+- **Head Line**: Intelligence type, mental approach, decision-making style
+- **Life Line**: Vitality, life energy, major life changes (NOT lifespan)
+- **Fate Line**: Career path, destiny, life direction
+- **Sun Line (Apollo)**: Success, fame, creativity, public recognition
+- **Mercury Line (Health)**: Business acumen, communication, health indicators
+- **Marriage Lines**: Significant relationships, commitment patterns
+
+### 2. MOUNTS (evaluate prominence: prominent/normal/flat)
+- **Mount of Jupiter** (below index finger): Ambition, leadership, ego
+- **Mount of Saturn** (below middle finger): Wisdom, responsibility, career
+- **Mount of Apollo** (below ring finger): Creativity, success, artistry
+- **Mount of Mercury** (below pinky): Communication, business, intelligence
+- **Mount of Venus** (thumb base): Love, passion, vitality, sensuality
+- **Mount of Luna** (opposite thumb): Imagination, intuition, creativity
+- **Mount of Mars** (2 areas): Courage, aggression, resilience
+
+### 3. FINGER ANALYSIS
+- Finger lengths relative to each other
+- Finger shapes (pointed/square/spatulate/conic)
+- Finger spacing (wide/normal/close)
+- Thumb characteristics (flexible/stiff, length, angle)
+
+### 4. HAND CHARACTERISTICS
+- Hand shape: Earth (square palm, short fingers) / Air (square palm, long fingers) / Fire (rectangular palm, short fingers) / Water (rectangular palm, long fingers)
+- Skin texture: Fine/Medium/Coarse
+- Flexibility indicators
+- Dominant hand assessment if visible
+
+### 5. SPECIAL MARKINGS (note location and significance)
+- Stars, crosses, triangles, squares, grilles
+- Islands, chains, breaks in lines
+- Branches (upward=positive, downward=challenges)
+- Sister lines, influence lines
+
+### 6. KEY INDICATORS TO ASSESS
+Based on the palm features, evaluate indicators for:
+- **Career/Occupation tendencies**: Creative, analytical, leadership, service, technical, entrepreneurial
+- **Financial potential**: Strong/moderate/developing wealth indicators
+- **Relationship patterns**: Romantic nature, marriage timing indicators, partnership style
+- **Children indicators**: Lines and markings suggesting offspring
+- **Success potential**: Fame lines, achievement markers
+- **Personality type**: Introvert/extrovert, emotional/logical, creative/practical
+- **Social standing indicators**: Leadership marks, public recognition signs
+
+Respond ONLY with valid JSON:
 {
   "lines": [
     {
       "name": "Heart Line",
-      "points": [
-        {"x": 85, "y": 28},
-        {"x": 70, "y": 25},
-        {"x": 55, "y": 23},
-        {"x": 40, "y": 25},
-        {"x": 25, "y": 30}
-      ],
-      "characteristics": {
-        "depth": "deep",
-        "length": "long",
-        "curvature": "curved"
-      },
-      "features": ["slightly branched at end"]
+      "points": [{"x": 85, "y": 28}, {"x": 70, "y": 25}, {"x": 55, "y": 23}, {"x": 40, "y": 25}],
+      "characteristics": {"depth": "deep", "length": "long", "curvature": "curved"},
+      "features": ["branches at end", "clear and unbroken"],
+      "interpretation": "Strong emotional nature, deep capacity for love"
     }
   ],
-  "palmShape": "square|rectangular|conic|spatulate|mixed",
-  "dominantElement": "earth|air|fire|water",
-  "imageQuality": "excellent|good|moderate|poor",
-  "overallImpression": "Brief description of the palm's notable features"
+  "mounts": {
+    "jupiter": {"prominence": "prominent", "meaning": "Strong ambition and leadership"},
+    "saturn": {"prominence": "normal", "meaning": "Balanced responsibility"},
+    "apollo": {"prominence": "prominent", "meaning": "Creative success indicated"},
+    "mercury": {"prominence": "normal", "meaning": "Good communication skills"},
+    "venus": {"prominence": "prominent", "meaning": "Passionate nature, strong vitality"},
+    "luna": {"prominence": "normal", "meaning": "Good imagination"},
+    "mars": {"prominence": "normal", "meaning": "Adequate courage and resilience"}
+  },
+  "fingers": {
+    "shapes": "Mixed conic and square",
+    "spacing": "Normal spacing with slight gap between index and middle",
+    "lengths": "Index finger nearly equal to ring finger",
+    "thumb": "Strong, flexible thumb indicating adaptability"
+  },
+  "handShape": "Fire hand - rectangular palm with shorter fingers",
+  "skinTexture": "Medium texture indicating balance of sensitivity and practicality",
+  "specialMarkings": [
+    {"type": "star", "location": "Mount of Apollo", "meaning": "Potential for recognition and success"},
+    {"type": "triangle", "location": "Center of palm", "meaning": "Good fortune and intellectual achievement"}
+  ],
+  "keyIndicators": {
+    "careerType": "Leadership and creative fields favored",
+    "financialPotential": "Strong wealth accumulation potential",
+    "relationshipStyle": "Passionate, committed, seeks deep connection",
+    "childrenIndicators": "2-3 prominent lines suggesting children",
+    "successPotential": "High - multiple success markers present",
+    "personalityType": "Extroverted, emotionally intelligent, creative",
+    "socialStanding": "Natural leadership, likely to achieve prominence"
+  },
+  "genderIndicators": "Appears to be [male/female] based on hand structure",
+  "dominantElement": "Fire - passionate, energetic, action-oriented",
+  "imageQuality": "good",
+  "overallImpression": "A hand showing strong potential for success, deep emotional capacity, and natural leadership abilities"
 }`;
 
-// Prompt for generating palm reading interpretation
-const PALM_READING_PROMPT = `You are a mystical palm reader providing an insightful and personalized reading. Based on the palm analysis data provided, generate an engaging, detailed palm reading.
+// Comprehensive prompt for detailed palm reading generation
+const PALM_READING_PROMPT = `You are a master palmist providing a comprehensive, precise life reading. Based on the detailed palm analysis below, generate specific predictions and insights.
 
-Palm Analysis Data:
+## PALM ANALYSIS DATA:
 {ANALYSIS_DATA}
 
-Generate a palm reading that includes:
-1. **Opening** - A mystical greeting acknowledging the unique nature of this palm
-2. **The Heart Line** - Interpretation of emotional life, relationships, and love
-3. **The Head Line** - Interpretation of intellect, thinking style, and decision making
-4. **The Life Line** - Interpretation of vitality, life journey, and major life changes (NOT lifespan prediction)
-5. **Other Lines** - Interpret any additional lines found (Fate, Sun, Mercury, etc.)
-6. **Special Features** - Meaning of any notable features like branches, islands, or crosses
-7. **Overall Reading** - A synthesized interpretation bringing all elements together
-8. **Guidance** - Positive, empowering advice based on the reading
+## GENERATE A COMPLETE READING WITH THESE SECTIONS:
 
-IMPORTANT GUIDELINES:
-- Be mystical and engaging but respectful
-- Focus on personality traits, tendencies, and potentials
-- NEVER predict death, serious illness, or negative life events
-- Keep the tone positive and empowering
-- Use evocative, poetic language
-- Make it personal and specific based on the actual line characteristics
+### 1. OPENING
+A personalized mystical greeting acknowledging this unique palm.
+
+### 2. PERSONALITY PROFILE
+- Core personality traits
+- Emotional nature (from Heart Line)
+- Mental approach (from Head Line)
+- Temperament (from hand shape and mounts)
+- Strengths and growth areas
+
+### 3. CAREER & OCCUPATION
+Based on the lines, mounts, and finger characteristics, predict:
+- Most suitable career paths (be specific: e.g., "medicine, particularly surgery" not just "healthcare")
+- Leadership potential and style
+- Entrepreneurial indicators
+- Creative vs analytical career alignment
+- Peak career periods
+
+### 4. FINANCIAL OUTLOOK
+- Wealth accumulation potential
+- Money management style
+- Best periods for financial growth
+- Sources of income (salary, business, investments, inheritance)
+- Financial advice based on palm indicators
+
+### 5. MARRIAGE & RELATIONSHIPS
+- Romantic nature and love style
+- Ideal partner characteristics
+- Marriage timing indicators (early/mid/later in life)
+- Number of significant relationships indicated
+- Relationship challenges and strengths
+- Compatibility indicators
+
+### 6. CHILDREN & FAMILY
+- Children indicators (number suggested by lines)
+- Parenting style indicated
+- Family harmony indicators
+- Relationship with children
+
+### 7. SUCCESS & ACHIEVEMENT
+- Fame and recognition potential
+- Areas of greatest success
+- Timing of major achievements
+- Public vs private success orientation
+- Legacy indicators
+
+### 8. SOCIAL STATUS & PUBLIC LIFE
+- Natural social position
+- Leadership in community
+- Public recognition potential
+- Social circle characteristics
+- Influence and impact on others
+
+### 9. HEALTH & VITALITY
+- Overall vitality indicators (from Life Line)
+- Areas requiring attention
+- Energy levels and stamina
+- Longevity indicators (vitality, NOT death prediction)
+
+### 10. LIFE PATH SUMMARY
+A comprehensive synthesis bringing all elements together into a cohesive life narrative.
+
+### 11. GUIDANCE & ADVICE
+Specific, actionable advice based on the reading.
+
+## IMPORTANT GUIDELINES:
+- Be SPECIFIC and PRECISE - avoid vague statements
+- Use the actual palm data to justify predictions
+- Give concrete examples (e.g., "suited for careers in law, particularly litigation" not just "good communication")
+- Include timing when indicators suggest it (e.g., "marriage most likely in late 20s to early 30s")
+- Be confident but balanced - mention both potentials and areas for growth
+- NEVER predict death, serious illness, or catastrophic events
+- Maintain a positive, empowering tone while being realistic
 
 Respond in JSON format:
 {
-  "opening": "Your mystical greeting...",
-  "heartLine": {
-    "title": "The Path of the Heart",
-    "interpretation": "Detailed interpretation..."
+  "opening": "Personalized mystical greeting...",
+  "personality": {
+    "title": "Your Inner Nature",
+    "coreTraits": ["trait1", "trait2", "trait3"],
+    "emotionalNature": "Detailed description...",
+    "mentalApproach": "Detailed description...",
+    "temperament": "Detailed description...",
+    "strengths": ["strength1", "strength2"],
+    "growthAreas": ["area1", "area2"]
   },
-  "headLine": {
-    "title": "The River of Thought",
-    "interpretation": "Detailed interpretation..."
+  "career": {
+    "title": "Your Professional Destiny",
+    "suitablePaths": ["Specific career 1", "Specific career 2", "Specific career 3"],
+    "leadershipStyle": "Description...",
+    "entrepreneurialPotential": "High/Medium/Low with explanation",
+    "careerOrientation": "Creative/Analytical/Leadership/Service",
+    "peakPeriods": "Description of timing...",
+    "detailedReading": "Full career interpretation..."
   },
-  "lifeLine": {
-    "title": "The Arc of Vitality",
-    "interpretation": "Detailed interpretation..."
+  "finance": {
+    "title": "Your Wealth Potential",
+    "wealthPotential": "Strong/Moderate/Developing",
+    "moneyStyle": "Description of financial behavior...",
+    "incomeSources": ["Primary source", "Secondary source"],
+    "bestPeriods": "Description...",
+    "advice": "Specific financial guidance...",
+    "detailedReading": "Full financial interpretation..."
   },
-  "otherLines": [
-    {
-      "name": "Fate Line",
-      "title": "The Thread of Destiny",
-      "interpretation": "Interpretation..."
-    }
-  ],
-  "specialFeatures": "Interpretation of special features...",
-  "overallReading": "Synthesized interpretation...",
-  "guidance": "Empowering advice..."
+  "marriage": {
+    "title": "Your Heart's Journey",
+    "romanticNature": "Description...",
+    "idealPartner": "Characteristics description...",
+    "marriageTiming": "Specific timing indication...",
+    "numberOfRelationships": "Indicated number...",
+    "relationshipStrengths": ["strength1", "strength2"],
+    "challenges": ["challenge1"],
+    "detailedReading": "Full relationship interpretation..."
+  },
+  "children": {
+    "title": "Your Legacy of Love",
+    "childrenIndicated": "Number or range...",
+    "parentingStyle": "Description...",
+    "familyHarmony": "Description...",
+    "detailedReading": "Full children/family interpretation..."
+  },
+  "success": {
+    "title": "Your Path to Achievement",
+    "famePotential": "High/Moderate/Private success orientation",
+    "areasOfSuccess": ["Area 1", "Area 2"],
+    "achievementTiming": "Description...",
+    "legacyIndicators": "Description...",
+    "detailedReading": "Full success interpretation..."
+  },
+  "socialStatus": {
+    "title": "Your Place in the World",
+    "naturalPosition": "Description...",
+    "leadershipRole": "Description...",
+    "publicRecognition": "Description...",
+    "influence": "Description...",
+    "detailedReading": "Full social status interpretation..."
+  },
+  "health": {
+    "title": "Your Vitality",
+    "overallVitality": "Strong/Good/Moderate",
+    "energyLevels": "Description...",
+    "areasOfAttention": ["Area 1"],
+    "detailedReading": "Full health interpretation..."
+  },
+  "lifePath": {
+    "title": "Your Life's Narrative",
+    "summary": "Comprehensive life path synthesis..."
+  },
+  "guidance": {
+    "title": "Wisdom for Your Journey",
+    "advice": ["Specific advice 1", "Specific advice 2", "Specific advice 3"],
+    "affirmation": "A powerful closing affirmation..."
+  }
 }`;
 
 // Convert image data URL to base64
@@ -120,7 +290,7 @@ const analyzeWithAnthropic = async (imageDataUrl, apiKey, prompt) => {
     },
     body: JSON.stringify({
       model: 'claude-sonnet-4-20250514',
-      max_tokens: 3000,
+      max_tokens: 4096,
       messages: [
         {
           role: 'user',
@@ -166,7 +336,7 @@ const generateReadingWithAnthropic = async (analysisData, apiKey) => {
     },
     body: JSON.stringify({
       model: 'claude-sonnet-4-20250514',
-      max_tokens: 2500,
+      max_tokens: 4096,
       messages: [
         {
           role: 'user',
@@ -207,7 +377,13 @@ const parseVLMResponse = (content) => {
     const parsed = JSON.parse(jsonMatch[0]);
     return {
       lines: parsed.lines || [],
-      palmShape: parsed.palmShape || 'unknown',
+      mounts: parsed.mounts || {},
+      fingers: parsed.fingers || {},
+      handShape: parsed.handShape || 'unknown',
+      skinTexture: parsed.skinTexture || 'unknown',
+      specialMarkings: parsed.specialMarkings || [],
+      keyIndicators: parsed.keyIndicators || {},
+      genderIndicators: parsed.genderIndicators || 'unknown',
       dominantElement: parsed.dominantElement || 'unknown',
       imageQuality: parsed.imageQuality || 'moderate',
       overallImpression: parsed.overallImpression || '',
@@ -232,11 +408,10 @@ const parseReadingResponse = (content) => {
 
   const jsonMatch = content.match(/\{[\s\S]*\}/);
   if (!jsonMatch) {
-    // Return raw content as overall reading if no JSON
     return {
       opening: 'The lines of your palm reveal a unique story...',
       overallReading: content,
-      guidance: 'Trust in your journey and the wisdom your hands reveal.',
+      guidance: { advice: ['Trust in your journey and the wisdom your hands reveal.'] },
     };
   }
 
@@ -246,7 +421,7 @@ const parseReadingResponse = (content) => {
     return {
       opening: 'The lines of your palm reveal a unique story...',
       overallReading: content,
-      guidance: 'Trust in your journey and the wisdom your hands reveal.',
+      guidance: { advice: ['Trust in your journey and the wisdom your hands reveal.'] },
     };
   }
 };
@@ -296,7 +471,6 @@ export const generateVLMGuidedMask = (vlmResult, width, height, lineWidth = 10) 
       const p2 = pixelPoints[i + 1];
       const p3 = pixelPoints[Math.min(pixelPoints.length - 1, i + 2)];
 
-      // Interpolate between p1 and p2
       const steps = Math.max(
         Math.abs(p2.x - p1.x),
         Math.abs(p2.y - p1.y),
@@ -308,7 +482,6 @@ export const generateVLMGuidedMask = (vlmResult, width, height, lineWidth = 10) 
         const s2 = s * s;
         const s3 = s2 * s;
 
-        // Catmull-Rom spline
         const x = Math.round(
           0.5 * (
             2 * p1.x +
@@ -326,7 +499,6 @@ export const generateVLMGuidedMask = (vlmResult, width, height, lineWidth = 10) 
           )
         );
 
-        // Draw thick point
         for (let dy = -lineWidth; dy <= lineWidth; dy++) {
           for (let dx = -lineWidth; dx <= lineWidth; dx++) {
             if (dx * dx + dy * dy <= lineWidth * lineWidth) {
@@ -360,12 +532,10 @@ export const LINE_COLORS = {
 
 // Get color for a line name
 export const getLineColor = (lineName) => {
-  // Check for exact match first
   if (LINE_COLORS[lineName]) {
     return LINE_COLORS[lineName];
   }
 
-  // Check for partial match
   for (const key of Object.keys(LINE_COLORS)) {
     if (lineName.toLowerCase().includes(key.toLowerCase().replace(' line', ''))) {
       return LINE_COLORS[key];
