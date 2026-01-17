@@ -63,98 +63,25 @@ const erodeMask = (mask, width, height, radius) => {
   return result;
 };
 
-// Create palm region mask - very restrictive to only include inner palm
-const createPalmMask = (data, width, height) => {
-  // Step 1: Detect skin pixels
+// Create interior palm mask - excludes all boundary pixels
+const createInteriorMask = (data, width, height) => {
   const skinMask = createSkinMask(data, width, height);
 
-  // Step 2: Erode to get the inner palm region while preserving enough area for lines
-  // Less aggressive to ensure we capture the major palm lines
-  const erodeRadius = Math.max(8, Math.floor(Math.min(width, height) / 20));
-  const erodedMask = erodeMask(skinMask, width, height, erodeRadius);
+  // Very aggressive erosion to get only interior pixels far from any edge
+  const erodeRadius = Math.max(20, Math.floor(Math.min(width, height) / 10));
+  const interiorMask = erodeMask(skinMask, width, height, erodeRadius);
 
-  // Step 3: Find bounding box of skin region
-  let skinMinY = height, skinMaxY = 0;
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      if (skinMask[y * width + x] === 255) {
-        skinMinY = Math.min(skinMinY, y);
-        skinMaxY = Math.max(skinMaxY, y);
-      }
-    }
-  }
-
-  // Step 4: Find the palm center from eroded mask
-  let sumX = 0, sumY = 0, count = 0;
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      if (erodedMask[y * width + x] === 255) {
-        sumX += x;
-        sumY += y;
-        count++;
-      }
-    }
-  }
-
-  // If no palm detected after erosion, use fallback
-  if (count < 50) {
-    const fallbackMask = new Uint8Array(width * height);
-    const centerX = width / 2;
-    const centerY = height * 0.55; // Lower center for palm
-    const radiusX = width * 0.25;
-    const radiusY = height * 0.25;
-
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        const dx = (x - centerX) / radiusX;
-        const dy = (y - centerY) / radiusY;
-        if (dx * dx + dy * dy <= 1) {
-          fallbackMask[y * width + x] = 255;
-        }
-      }
-    }
-    return fallbackMask;
-  }
-
-  const palmCenterX = sumX / count;
-  const palmCenterY = sumY / count;
-
-  // Step 5: Create final palm mask - elliptical region around palm center
-  // Cover enough area to include all major palm lines
-  const palmMask = new Uint8Array(width * height);
-  const handHeight = skinMaxY - skinMinY;
-  const palmRadiusX = width * 0.38;
-  const palmRadiusY = handHeight * 0.45;
-
-  // The palm region should be in the lower-middle of the hand
-  // Shift center down slightly to avoid fingers
-  const adjustedCenterY = Math.min(palmCenterY + handHeight * 0.05, skinMaxY - palmRadiusY);
-
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const idx = y * width + x;
-
-      // Elliptical palm region
-      const dx = (x - palmCenterX) / palmRadiusX;
-      const dy = (y - adjustedCenterY) / palmRadiusY;
-
-      if (dx * dx + dy * dy <= 1 && skinMask[idx] === 255) {
-        palmMask[idx] = 255;
-      }
-    }
-  }
-
-  return palmMask;
+  return interiorMask;
 };
 
-// Palm line detection - optimized for major palm creases only
+// Palm line detection - detects dark creases within palm interior only
 const detectPalmLines = (imageData, sensitivity = 50, lineThickness = 2, vlmMask = null, vlmWeight = 0.5) => {
   const { data, width, height } = imageData;
   const gray = new Float32Array(width * height);
   const output = new Uint8ClampedArray(data.length);
 
-  // Create restrictive palm region mask
-  const palmMask = createPalmMask(data, width, height);
+  // Create interior-only mask (far from any skin boundary)
+  const interiorMask = createInteriorMask(data, width, height);
 
   // Convert to grayscale
   for (let i = 0; i < data.length; i += 4) {
@@ -162,13 +89,7 @@ const detectPalmLines = (imageData, sensitivity = 50, lineThickness = 2, vlmMask
     gray[idx] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
   }
 
-  // Apply contrast enhancement
-  const contrastFactor = 1.2;
-  for (let i = 0; i < gray.length; i++) {
-    gray[i] = Math.max(0, Math.min(255, ((gray[i] - 128) * contrastFactor) + 128));
-  }
-
-  // Apply strong Gaussian blur to eliminate skin texture
+  // Apply Gaussian blur to reduce noise while preserving creases
   const kernel = [1, 4, 6, 4, 1];
   const kernelSum = 16;
 
@@ -201,182 +122,93 @@ const detectPalmLines = (imageData, sensitivity = 50, lineThickness = 2, vlmMask
     return result;
   };
 
-  // Apply blur 3 times for very strong smoothing
+  // Apply moderate blur
   let blurred = applyGaussianBlur(gray);
-  blurred = applyGaussianBlur(blurred);
   blurred = applyGaussianBlur(blurred);
 
   // Detect valleys (dark creases) - palm lines are darker than surrounding skin
-  const valleys = new Float32Array(width * height);
+  // This is the PRIMARY detection method - not edge detection
+  const creaseStrength = new Float32Array(width * height);
+  const sampleDist = 4;
 
-  for (let y = 3; y < height - 3; y++) {
-    for (let x = 3; x < width - 3; x++) {
+  for (let y = sampleDist; y < height - sampleDist; y++) {
+    for (let x = sampleDist; x < width - sampleDist; x++) {
       const idx = y * width + x;
-      if (palmMask[idx] === 0) continue;
+      if (interiorMask[idx] === 0) continue;
 
       const center = blurred[idx];
 
-      // Sample neighbors at larger distance for better crease detection
-      const neighbors = [
-        blurred[(y - 3) * width + x],
-        blurred[(y + 3) * width + x],
-        blurred[y * width + (x - 3)],
-        blurred[y * width + (x + 3)],
-        blurred[(y - 3) * width + (x - 3)],
-        blurred[(y - 3) * width + (x + 3)],
-        blurred[(y + 3) * width + (x - 3)],
-        blurred[(y + 3) * width + (x + 3)],
+      // Sample in multiple directions to find creases
+      const samples = [
+        [blurred[(y - sampleDist) * width + x], blurred[(y + sampleDist) * width + x]], // vertical
+        [blurred[y * width + (x - sampleDist)], blurred[y * width + (x + sampleDist)]], // horizontal
+        [blurred[(y - sampleDist) * width + (x - sampleDist)], blurred[(y + sampleDist) * width + (x + sampleDist)]], // diagonal 1
+        [blurred[(y - sampleDist) * width + (x + sampleDist)], blurred[(y + sampleDist) * width + (x - sampleDist)]], // diagonal 2
       ];
 
-      // Valley score - how much darker is center vs neighbors
-      let valleyScore = 0;
-      for (const neighbor of neighbors) {
-        if (neighbor > center) {
-          valleyScore += neighbor - center;
+      // A crease is where center is darker than BOTH sides in at least one direction
+      let maxCreaseScore = 0;
+      for (const [side1, side2] of samples) {
+        const minSide = Math.min(side1, side2);
+        if (center < minSide) {
+          // Center is darker than both sides - this is a crease
+          const creaseScore = minSide - center;
+          maxCreaseScore = Math.max(maxCreaseScore, creaseScore);
         }
       }
 
-      valleys[idx] = valleyScore;
+      creaseStrength[idx] = maxCreaseScore;
     }
   }
 
-  // Sobel edge detection
-  const edges = new Float32Array(width * height);
-  const directions = new Float32Array(width * height);
-
-  for (let y = 1; y < height - 1; y++) {
-    for (let x = 1; x < width - 1; x++) {
-      const idx = y * width + x;
-      if (palmMask[idx] === 0) continue;
-
-      const gx = (
-        -blurred[(y - 1) * width + (x - 1)] - 2 * blurred[y * width + (x - 1)] - blurred[(y + 1) * width + (x - 1)] +
-        blurred[(y - 1) * width + (x + 1)] + 2 * blurred[y * width + (x + 1)] + blurred[(y + 1) * width + (x + 1)]
-      );
-
-      const gy = (
-        -blurred[(y - 1) * width + (x - 1)] - 2 * blurred[(y - 1) * width + x] - blurred[(y - 1) * width + (x + 1)] +
-        blurred[(y + 1) * width + (x - 1)] + 2 * blurred[(y + 1) * width + x] + blurred[(y + 1) * width + (x + 1)]
-      );
-
-      edges[idx] = Math.sqrt(gx * gx + gy * gy);
-      directions[idx] = Math.atan2(gy, gx);
+  // Find threshold based on crease strength distribution
+  let maxCrease = 0;
+  let creaseSum = 0;
+  let creaseCount = 0;
+  for (let i = 0; i < creaseStrength.length; i++) {
+    if (creaseStrength[i] > 0) {
+      maxCrease = Math.max(maxCrease, creaseStrength[i]);
+      creaseSum += creaseStrength[i];
+      creaseCount++;
     }
   }
 
-  // Non-maximum suppression
-  const suppressed = new Float32Array(width * height);
-
-  for (let y = 2; y < height - 2; y++) {
-    for (let x = 2; x < width - 2; x++) {
-      const idx = y * width + x;
-      if (palmMask[idx] === 0) continue;
-
-      const angle = directions[idx];
-      const mag = edges[idx];
-
-      let neighbor1, neighbor2;
-      const sector = Math.round(((angle + Math.PI) / Math.PI) * 4) % 4;
-
-      switch (sector) {
-        case 0:
-          neighbor1 = edges[y * width + (x - 1)];
-          neighbor2 = edges[y * width + (x + 1)];
-          break;
-        case 1:
-          neighbor1 = edges[(y - 1) * width + (x + 1)];
-          neighbor2 = edges[(y + 1) * width + (x - 1)];
-          break;
-        case 2:
-          neighbor1 = edges[(y - 1) * width + x];
-          neighbor2 = edges[(y + 1) * width + x];
-          break;
-        case 3:
-          neighbor1 = edges[(y - 1) * width + (x - 1)];
-          neighbor2 = edges[(y + 1) * width + (x + 1)];
-          break;
-        default:
-          neighbor1 = neighbor2 = 0;
-      }
-
-      if (mag >= neighbor1 && mag >= neighbor2) {
-        // Boost edges that are valleys (dark creases) - palm lines are darker than skin
-        // Use gentler suppression to catch the actual lines
-        const valleyBoost = valleys[idx] > 2 ? 1.0 + (valleys[idx] / 30) : 0.3;
-        suppressed[idx] = mag * valleyBoost;
-      }
-    }
-  }
-
-  // Find max edge for threshold calculation
-  let maxEdge = 0;
-  for (let i = 0; i < suppressed.length; i++) {
-    if (suppressed[i] > maxEdge) maxEdge = suppressed[i];
-  }
-
-  // Balanced threshold - detect major creases without skin texture
-  const sensitivityFactor = (sensitivity - 20) / 75;
-  const baseThreshold = 0.18; // Lower base for better detection
-  const minThreshold = 0.08;  // Lower minimum too
-  const thresholdMultiplier = baseThreshold - (sensitivityFactor * (baseThreshold - minThreshold));
-  const threshold = maxEdge * thresholdMultiplier;
-  const lowThreshold = threshold * 0.6;
+  // Adaptive threshold based on sensitivity
+  const sensitivityFactor = sensitivity / 100;
+  const avgCrease = creaseCount > 0 ? creaseSum / creaseCount : 0;
+  const threshold = avgCrease + (maxCrease - avgCrease) * (1 - sensitivityFactor) * 0.5;
 
   const result = new Uint8Array(width * height);
 
-  // Hysteresis thresholding
+  // Apply threshold with VLM guidance
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       const idx = y * width + x;
-      if (palmMask[idx] === 0) continue;
+      if (interiorMask[idx] === 0) continue;
 
       let effectiveThreshold = threshold;
-      let effectiveLowThreshold = lowThreshold;
-
       if (vlmMask && vlmMask[idx] > 0) {
-        const vlmFactor = 1 - (vlmWeight * 0.4);
-        effectiveThreshold = threshold * vlmFactor;
-        effectiveLowThreshold = lowThreshold * vlmFactor;
+        effectiveThreshold = threshold * (1 - vlmWeight * 0.3);
       }
 
-      if (suppressed[idx] > effectiveThreshold) {
+      if (creaseStrength[idx] > effectiveThreshold) {
         result[idx] = 255;
-      } else if (suppressed[idx] > effectiveLowThreshold) {
-        let connected = false;
-        for (let dy = -1; dy <= 1 && !connected; dy++) {
-          for (let dx = -1; dx <= 1 && !connected; dx++) {
-            const ny = y + dy;
-            const nx = x + dx;
-            if (ny >= 0 && ny < height && nx >= 0 && nx < width) {
-              if (suppressed[ny * width + nx] > effectiveThreshold) {
-                connected = true;
-              }
-            }
-          }
-        }
-        if (connected) result[idx] = 255;
       }
     }
   }
 
-  // Apply dilation
+  // Apply slight dilation for visibility
   const dilated = new Uint8Array(width * height);
-  const dilateRadius = Math.max(0, Math.floor((lineThickness - 1) / 2));
+  const dilateRadius = Math.max(1, Math.floor(lineThickness / 2));
 
-  if (dilateRadius === 0) {
-    dilated.set(result);
-  } else {
-    for (let y = dilateRadius; y < height - dilateRadius; y++) {
-      for (let x = dilateRadius; x < width - dilateRadius; x++) {
-        if (result[y * width + x] === 255) {
-          for (let dy = -dilateRadius; dy <= dilateRadius; dy++) {
-            for (let dx = -dilateRadius; dx <= dilateRadius; dx++) {
-              if (dx * dx + dy * dy <= dilateRadius * dilateRadius + 1) {
-                const targetIdx = (y + dy) * width + (x + dx);
-                if (palmMask[targetIdx] === 255) {
-                  dilated[targetIdx] = 255;
-                }
-              }
+  for (let y = dilateRadius; y < height - dilateRadius; y++) {
+    for (let x = dilateRadius; x < width - dilateRadius; x++) {
+      if (result[y * width + x] === 255) {
+        for (let dy = -dilateRadius; dy <= dilateRadius; dy++) {
+          for (let dx = -dilateRadius; dx <= dilateRadius; dx++) {
+            if (dx * dx + dy * dy <= dilateRadius * dilateRadius + 1) {
+              const targetIdx = (y + dy) * width + (x + dx);
+              dilated[targetIdx] = 255;
             }
           }
         }
