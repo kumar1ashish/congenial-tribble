@@ -442,27 +442,31 @@ class SAMSegmenter:
         # This gives better results for the fallback
         mask = np.zeros((h, w), dtype=np.uint8)
 
-        # Get the strongest responses - balanced threshold
+        # Get the strongest responses - capture more of the lines
         valid_responses = frangi_masked[frangi_masked > 0]
         if len(valid_responses) > 0:
-            threshold = np.percentile(valid_responses, 85)  # Top 15% for better coverage
+            threshold = np.percentile(valid_responses, 80)  # Top 20% for better line capture
 
             # Apply threshold
             binary = (frangi_masked > threshold).astype(np.uint8) * 255
 
-            # Remove small noise fragments with area filtering
+            # Strong morphological closing FIRST to connect nearby segments
+            kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+            binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel_close)
+
+            # Remove small isolated fragments AFTER closing
             num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
-            min_area = 30  # Lower threshold to keep more line segments
+            min_area = 200  # Higher threshold - only keep substantial line segments
             for i in range(1, num_labels):
                 if stats[i, cv2.CC_STAT_AREA] < min_area:
                     binary[labels == i] = 0
 
-            # Close gaps to connect line segments
-            kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
-            binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel_close)
+            # Second closing pass for any remaining gaps
+            kernel_close2 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
+            binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel_close2)
 
             # Dilate to make lines thicker and more visible
-            kernel_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (4, 4))
+            kernel_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
             binary = cv2.dilate(binary, kernel_dilate, iterations=1)
 
             mask = binary
@@ -647,7 +651,7 @@ class PalmLineDetectionPipeline:
         """
         # Create interior mask to exclude hand boundaries
         print("Creating interior mask to exclude hand boundaries...")
-        interior_mask = create_interior_mask(image_rgb, erosion_ratio=0.04)
+        interior_mask = create_interior_mask(image_rgb, erosion_ratio=0.07)  # Stronger erosion to exclude outline
 
         print("Phase 1: Applying Frangi Vesselness Filter...")
         frangi_response = self.frangi_detector.detect(image_rgb, interior_mask)
