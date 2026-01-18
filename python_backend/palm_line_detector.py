@@ -421,61 +421,79 @@ class SAMSegmenter:
         interior_mask: Optional[np.ndarray] = None
     ) -> Dict[str, np.ndarray]:
         """
-        Fallback segmentation using Frangi response + thresholding.
-        Uses high percentile threshold to only detect major creases.
+        Detect palm lines using multi-scale dark line extraction.
+        Palm lines are DARK creases on lighter skin - we detect them directly.
         """
         h, w = image.shape[:2]
 
-        if frangi_response is None:
-            # Simple edge detection fallback
-            gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-            frangi_response = cv2.Canny(gray, 50, 150).astype(float) / 255.0
+        # Convert to grayscale
+        gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
 
         # Create interior mask if not provided
         if interior_mask is None:
             interior_mask = create_interior_mask(image)
 
-        # Apply interior mask to Frangi response
-        frangi_masked = frangi_response * (interior_mask / 255.0)
+        # === STEP 1: Enhance contrast with CLAHE ===
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        enhanced = clahe.apply(gray)
 
-        # Use full palm area instead of individual bounding boxes
-        # This gives better results for the fallback
-        mask = np.zeros((h, w), dtype=np.uint8)
+        # === STEP 2: Multi-scale black-hat transform to extract dark lines ===
+        # Black-hat = closing - original (highlights dark features on light background)
+        combined_lines = np.zeros((h, w), dtype=np.float32)
 
-        # Get precise line responses - high threshold for exact lines
-        valid_responses = frangi_masked[frangi_masked > 0]
-        if len(valid_responses) > 0:
-            threshold = np.percentile(valid_responses, 92)  # Top 8% - only strongest responses
+        for kernel_size in [9, 15, 23]:  # Multiple scales for different line widths
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+            blackhat = cv2.morphologyEx(enhanced, cv2.MORPH_BLACKHAT, kernel)
+            combined_lines += blackhat.astype(np.float32)
 
-            # Apply threshold
-            binary = (frangi_masked > threshold).astype(np.uint8) * 255
+        # Normalize combined response
+        combined_lines = (combined_lines / combined_lines.max() * 255).astype(np.uint8)
 
-            # Minimal closing to connect only very close gaps (not merge blobs)
-            kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-            binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel_close)
+        # === STEP 3: Adaptive thresholding for local line detection ===
+        adaptive = cv2.adaptiveThreshold(
+            enhanced, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY_INV, 15, 5
+        )
 
-            # Remove tiny noise fragments
-            num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
-            min_area = 50  # Keep smaller segments to preserve line detail
-            for i in range(1, num_labels):
-                if stats[i, cv2.CC_STAT_AREA] < min_area:
-                    binary[labels == i] = 0
+        # === STEP 4: Combine black-hat and adaptive results ===
+        # Use black-hat for major lines, adaptive for finer details
+        _, blackhat_binary = cv2.threshold(combined_lines, 30, 255, cv2.THRESH_BINARY)
 
-            # Thin lines using skeletonization to get precise 1-pixel lines
-            from skimage.morphology import skeletonize
-            skeleton = skeletonize(binary > 0)
-            binary = (skeleton * 255).astype(np.uint8)
+        # Combine: use OR to get both major and minor lines
+        combined = cv2.bitwise_or(blackhat_binary, adaptive)
 
-            # Slight dilation for visibility (2px wide lines)
-            kernel_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
-            binary = cv2.dilate(binary, kernel_dilate, iterations=1)
+        # === STEP 5: Apply interior mask (exclude hand outline) ===
+        combined = cv2.bitwise_and(combined, interior_mask)
 
-            mask = binary
+        # === STEP 6: Morphological cleanup ===
+        # Small opening to remove noise dots
+        kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
+        combined = cv2.morphologyEx(combined, cv2.MORPH_OPEN, kernel_open)
+
+        # Close small gaps in lines
+        kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        combined = cv2.morphologyEx(combined, cv2.MORPH_CLOSE, kernel_close)
+
+        # === STEP 7: Remove small fragments, keep connected lines ===
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(combined, connectivity=8)
+        min_area = 100  # Remove tiny noise fragments
+        for i in range(1, num_labels):
+            if stats[i, cv2.CC_STAT_AREA] < min_area:
+                combined[labels == i] = 0
+
+        # === STEP 8: Skeletonize to get 1-pixel precise lines ===
+        from skimage.morphology import skeletonize
+        skeleton = skeletonize(combined > 0)
+
+        # === STEP 9: Dilate for visibility (3px wide - visible but precise) ===
+        skeleton_img = (skeleton * 255).astype(np.uint8)
+        kernel_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        final_lines = cv2.dilate(skeleton_img, kernel_dilate, iterations=1)
 
         # Return single combined mask for all lines
         masks_dict = {}
         for line_name in bounding_boxes.keys():
-            masks_dict[line_name] = mask.copy()
+            masks_dict[line_name] = final_lines.copy()
 
         return masks_dict
 
