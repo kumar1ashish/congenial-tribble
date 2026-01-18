@@ -421,72 +421,63 @@ class SAMSegmenter:
         interior_mask: Optional[np.ndarray] = None
     ) -> Dict[str, np.ndarray]:
         """
-        Detect palm lines by INVERTING grayscale and applying Frangi.
-        Dark creases become bright → Frangi detects them as ridges.
+        Simple approach: bilateral filter + adaptive threshold + Canny edges.
+        Combines edge detection with dark line detection.
         """
-        from skimage.filters import frangi
         from skimage.morphology import skeletonize
 
         h, w = image.shape[:2]
-
-        # Convert to grayscale
         gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
 
-        # Create interior mask if not provided
         if interior_mask is None:
             interior_mask = create_interior_mask(image)
 
-        # === STEP 1: Enhance contrast with CLAHE ===
-        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-        enhanced = clahe.apply(gray)
+        # === METHOD 1: Bilateral filter + adaptive threshold ===
+        # Bilateral smooths skin texture but keeps line edges sharp
+        bilateral = cv2.bilateralFilter(gray, 9, 75, 75)
 
-        # === STEP 2: INVERT - dark lines become bright ===
-        inverted = 255 - enhanced
+        # CLAHE for contrast
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        enhanced = clahe.apply(bilateral)
 
-        # === STEP 3: Frangi on INVERTED image ===
-        # Larger sigmas = detect MAJOR lines, ignore fine texture
-        inverted_float = inverted.astype(np.float64) / 255.0
-
-        frangi_result = frangi(
-            inverted_float,
-            sigmas=range(3, 10, 2),  # sigmas 3,5,7,9 for major creases
-            black_ridges=False,
-            beta=0.5,
-            gamma=15
+        # Adaptive threshold - finds dark lines locally
+        adaptive = cv2.adaptiveThreshold(
+            enhanced, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY_INV, 21, 4
         )
 
-        # Normalize
-        if frangi_result.max() > 0:
-            frangi_norm = (frangi_result / frangi_result.max() * 255).astype(np.uint8)
-        else:
-            frangi_norm = np.zeros((h, w), dtype=np.uint8)
+        # === METHOD 2: Canny edge detection ===
+        blurred = cv2.GaussianBlur(gray, (5, 5), 1.5)
+        canny = cv2.Canny(blurred, 30, 100)
 
-        # === STEP 4: Apply interior mask ===
-        frangi_masked = cv2.bitwise_and(frangi_norm, interior_mask)
+        # === COMBINE both methods ===
+        combined = cv2.bitwise_or(adaptive, canny)
 
-        # === STEP 5: Otsu threshold ===
-        _, binary = cv2.threshold(frangi_masked, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        # === Apply interior mask ===
+        combined = cv2.bitwise_and(combined, interior_mask)
 
-        # === STEP 6: Morphological cleanup ===
-        kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
-        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel_close)
+        # === Morphological operations ===
+        # Close gaps
+        kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        combined = cv2.morphologyEx(combined, cv2.MORPH_CLOSE, kernel_close)
 
-        kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel_open)
+        # Remove noise
+        kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
+        combined = cv2.morphologyEx(combined, cv2.MORPH_OPEN, kernel_open)
 
-        # === STEP 7: Remove small fragments ===
-        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
-        min_area = 200
+        # === Remove small fragments ===
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(combined, connectivity=8)
+        min_area = 80
         for i in range(1, num_labels):
             if stats[i, cv2.CC_STAT_AREA] < min_area:
-                binary[labels == i] = 0
+                combined[labels == i] = 0
 
-        # === STEP 8: Skeletonize ===
-        skeleton = skeletonize(binary > 0)
+        # === Skeletonize for clean lines ===
+        skeleton = skeletonize(combined > 0)
         skeleton_img = (skeleton * 255).astype(np.uint8)
 
-        # === STEP 9: Dilate for visibility ===
-        kernel_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        # === Dilate for visibility ===
+        kernel_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
         final_lines = cv2.dilate(skeleton_img, kernel_dilate, iterations=1)
 
         masks_dict = {}
