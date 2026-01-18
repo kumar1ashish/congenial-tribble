@@ -472,8 +472,9 @@ class FeatureExtractor:
             return LineQuality.MEDIUM
 
         # Sample intensity along the line
+        # Points are in (x, y) format, but image access is [y, x]
         intensities = []
-        for y, x in points[::max(1, len(points)//20)]:
+        for x, y in points[::max(1, len(points)//20)]:
             if 0 <= y < self.height and 0 <= x < self.width:
                 intensities.append(self.gray[int(y), int(x)])
 
@@ -485,7 +486,7 @@ class FeatureExtractor:
 
         # Sample nearby pixels for comparison
         surrounding = []
-        for y, x in points[::max(1, len(points)//10)]:
+        for x, y in points[::max(1, len(points)//10)]:
             for dy in [-3, 3]:
                 ny = int(y + dy)
                 if 0 <= ny < self.height and 0 <= x < self.width:
@@ -982,7 +983,7 @@ class PalmReadingBridge:
             contours, _ = cv2.findContours(binary, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
 
             for contour in contours:
-                points = [(int(p[0][1]), int(p[0][0])) for p in contour]  # (y, x) format
+                points = [(int(p[0][0]), int(p[0][1])) for p in contour]  # (x, y) format
                 if len(points) >= 20:
                     all_contours.append(points)
 
