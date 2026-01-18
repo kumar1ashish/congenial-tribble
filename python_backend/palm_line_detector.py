@@ -442,31 +442,32 @@ class SAMSegmenter:
         # This gives better results for the fallback
         mask = np.zeros((h, w), dtype=np.uint8)
 
-        # Get the strongest responses - capture more of the lines
+        # Get precise line responses - high threshold for exact lines
         valid_responses = frangi_masked[frangi_masked > 0]
         if len(valid_responses) > 0:
-            threshold = np.percentile(valid_responses, 80)  # Top 20% for better line capture
+            threshold = np.percentile(valid_responses, 92)  # Top 8% - only strongest responses
 
             # Apply threshold
             binary = (frangi_masked > threshold).astype(np.uint8) * 255
 
-            # Strong morphological closing FIRST to connect nearby segments
-            kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+            # Minimal closing to connect only very close gaps (not merge blobs)
+            kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
             binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel_close)
 
-            # Remove small isolated fragments AFTER closing
+            # Remove tiny noise fragments
             num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
-            min_area = 200  # Higher threshold - only keep substantial line segments
+            min_area = 50  # Keep smaller segments to preserve line detail
             for i in range(1, num_labels):
                 if stats[i, cv2.CC_STAT_AREA] < min_area:
                     binary[labels == i] = 0
 
-            # Second closing pass for any remaining gaps
-            kernel_close2 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
-            binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel_close2)
+            # Thin lines using skeletonization to get precise 1-pixel lines
+            from skimage.morphology import skeletonize
+            skeleton = skeletonize(binary > 0)
+            binary = (skeleton * 255).astype(np.uint8)
 
-            # Dilate to make lines thicker and more visible
-            kernel_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+            # Slight dilation for visibility (2px wide lines)
+            kernel_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
             binary = cv2.dilate(binary, kernel_dilate, iterations=1)
 
             mask = binary
