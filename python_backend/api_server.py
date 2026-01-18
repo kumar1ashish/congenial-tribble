@@ -16,6 +16,11 @@ from PIL import Image
 import cv2
 
 from palm_line_detector import PalmLineDetectionPipeline, LineDetectionResult
+from palm_reading_bridge import (
+    PalmReadingBridge,
+    HandLandmarks,
+    create_palm_reading
+)
 
 app = Flask(__name__)
 CORS(app)
@@ -329,6 +334,131 @@ def configure_pipeline():
         })
 
     except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/palm-reading", methods=["POST"])
+def generate_palm_reading():
+    """
+    Generate a complete palm reading with extracted features and LLM prompts.
+
+    Request body (JSON):
+        image: Base64 encoded image
+        tone: (optional) Reading tone - "warm", "mystical", "analytical"
+        tradition: (optional) Palmistry tradition - "western", "chinese", "indian"
+        depth: (optional) Reading depth - "brief", "standard", "detailed"
+        focus_areas: (optional) List of areas to focus on
+        landmarks: (optional) MediaPipe hand landmarks
+
+    Response (JSON):
+        success: Boolean
+        features: Extracted palm features
+        prompts: System and user prompts for LLM
+        detection_quality: Quality assessment
+        lines_detected: List of detected line types
+        skeleton_overlay: Base64 encoded overlay image
+    """
+    try:
+        data = request.get_json()
+
+        if not data or "image" not in data:
+            return jsonify({"success": False, "error": "No image provided"}), 400
+
+        # Decode image
+        image_rgb = decode_base64_image(data["image"])
+
+        # Parse landmarks if provided
+        landmarks = None
+        if "landmarks" in data and data["landmarks"]:
+            # Assuming landmarks come as a list of 21 {x, y, z} objects
+            landmarks = HandLandmarks.estimate_from_image(image_rgb.shape)
+            # TODO: Parse actual MediaPipe landmarks when provided
+
+        # Run detection pipeline
+        pipe = get_pipeline()
+        result = pipe.process_array(image_rgb)
+
+        # Extract reading options
+        tone = data.get("tone", "warm")
+        tradition = data.get("tradition", "western")
+        depth = data.get("depth", "standard")
+        focus_areas = data.get("focus_areas", None)
+
+        # Create palm reading package
+        reading_data = create_palm_reading(
+            image_rgb,
+            result,
+            landmarks,
+            tone=tone,
+            tradition=tradition,
+            depth=depth
+        )
+
+        # Create overlay for response
+        overlay = create_overlay_image(
+            result.original_image,
+            result.combined_skeleton
+        )
+
+        return jsonify({
+            "success": True,
+            "features": reading_data["features"],
+            "prompts": reading_data["prompts"],
+            "detection_quality": reading_data["detection_quality"],
+            "lines_detected": reading_data["lines_detected"],
+            "skeleton_overlay": encode_mask_to_base64(overlay),
+            "skeleton_mask": encode_mask_to_base64(result.combined_skeleton)
+        })
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/palm-reading/features", methods=["POST"])
+def extract_palm_features():
+    """
+    Extract palm features only (without generating prompts).
+    Useful for debugging or custom prompt construction.
+
+    Request body (JSON):
+        image: Base64 encoded image
+
+    Response (JSON):
+        success: Boolean
+        features: Extracted palm features as JSON
+    """
+    try:
+        data = request.get_json()
+
+        if not data or "image" not in data:
+            return jsonify({"success": False, "error": "No image provided"}), 400
+
+        # Decode image
+        image_rgb = decode_base64_image(data["image"])
+
+        # Run detection pipeline
+        pipe = get_pipeline()
+        result = pipe.process_array(image_rgb)
+
+        # Extract features using bridge
+        bridge = PalmReadingBridge()
+        features = bridge.process(
+            image_rgb,
+            result.segmentation_masks,
+            None  # No landmarks
+        )
+
+        return jsonify({
+            "success": True,
+            "features": features._to_dict(),
+            "features_json": features.to_json()
+        })
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
         return jsonify({"success": False, "error": str(e)}), 500
 
 
