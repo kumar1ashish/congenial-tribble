@@ -442,27 +442,27 @@ class SAMSegmenter:
         # This gives better results for the fallback
         mask = np.zeros((h, w), dtype=np.uint8)
 
-        # Get the strongest responses (top 3-5%) to preserve line thickness
+        # Get the strongest responses - balanced threshold
         valid_responses = frangi_masked[frangi_masked > 0]
         if len(valid_responses) > 0:
-            threshold = np.percentile(valid_responses, 96)  # Top 4% for fuller lines
+            threshold = np.percentile(valid_responses, 85)  # Top 15% for better coverage
 
             # Apply threshold
             binary = (frangi_masked > threshold).astype(np.uint8) * 255
 
             # Remove small noise fragments with area filtering
             num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
-            min_area = 100  # Minimum pixels for a valid line segment
+            min_area = 30  # Lower threshold to keep more line segments
             for i in range(1, num_labels):
                 if stats[i, cv2.CC_STAT_AREA] < min_area:
                     binary[labels == i] = 0
 
             # Close gaps to connect line segments
-            kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+            kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
             binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel_close)
 
             # Dilate to make lines thicker and more visible
-            kernel_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+            kernel_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (4, 4))
             binary = cv2.dilate(binary, kernel_dilate, iterations=1)
 
             mask = binary
@@ -578,7 +578,7 @@ class PalmLineDetectionPipeline:
 
     def __init__(
         self,
-        frangi_sigmas: Tuple[float, ...] = (2.0, 2.5, 3.0, 3.5, 4.0),  # Larger sigmas for major lines only
+        frangi_sigmas: Tuple[float, ...] = (1.5, 2.0, 2.5, 3.0, 3.5),  # Range for various line thicknesses
         grounding_dino_config: Optional[str] = None,
         grounding_dino_weights: Optional[str] = None,
         sam_checkpoint: Optional[str] = None,
@@ -647,7 +647,7 @@ class PalmLineDetectionPipeline:
         """
         # Create interior mask to exclude hand boundaries
         print("Creating interior mask to exclude hand boundaries...")
-        interior_mask = create_interior_mask(image_rgb, erosion_ratio=0.06)
+        interior_mask = create_interior_mask(image_rgb, erosion_ratio=0.04)
 
         print("Phase 1: Applying Frangi Vesselness Filter...")
         frangi_response = self.frangi_detector.detect(image_rgb, interior_mask)
